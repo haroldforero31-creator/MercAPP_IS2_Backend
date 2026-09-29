@@ -185,7 +185,7 @@ class Product(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False)
     name = db.Column(db.String(150), nullable=False)
-    barcode = db.Column(db.String(50), nullable=True)
+    barcode = db.Column(db.String(60), nullable=True)
     price = db.Column(db.Integer, nullable=False)
     category_id = db.Column(db.Integer, db.ForeignKey('categoria.id'), nullable=False)
     subcategory_id = db.Column(db.Integer, db.ForeignKey('subcategoria.id'), nullable=True)
@@ -194,7 +194,7 @@ class Product(db.Model):
     stock = db.Column(db.Integer, nullable=True)
     sell_by_weight = db.Column(db.Boolean, default=False)
     weight_unit = db.Column(db.String(5), default='kg')  # 'kg' or 'lb'
-    plu_code = db.Column(db.String(10), nullable=True)
+    plu_code = db.Column(db.String(60), nullable=True)
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.now)
 
@@ -344,11 +344,16 @@ def validate_price(price_str):
         return None, 'El precio debe ser un número entero sin puntos ni comas (ej: 3500).'
     if not price_str.isdigit():
         return None, 'El precio solo puede contener números.'
-    price = int(price_str)
-    if price < 100:
-        return None, 'El precio mínimo es $100 COP.'
-    if price > 10000000:
-        return None, 'El precio máximo es $10.000.000 COP.'
+    if len(price_str) > 9:
+        return None, 'El precio no puede exceder los 9 dígitos (máximo $100.000.000 COP).'
+    try:
+        price = int(price_str)
+    except (ValueError, OverflowError):
+        return None, 'El precio ingresado es demasiado grande.'
+    if price < 50:
+        return None, 'El precio mínimo es $50 COP.'
+    if price > 100000000:
+        return None, 'El precio máximo es $100.000.000 COP.'
     return price, None
 
 
@@ -620,7 +625,7 @@ def product_add():
         price = request.form.get('price', '0')
         category_id = request.form.get('category_id')
         subcategory_id = request.form.get('subcategory_id', '') or None
-        stock = request.form.get('stock', '')
+        stock = request.form.get('stock', '').strip()
         sell_by_weight = request.form.get('sell_by_weight') == 'on'
         weight_unit = request.form.get('weight_unit', 'kg')
         
@@ -628,10 +633,38 @@ def product_add():
             flash('Nombre y categoría son obligatorios.', 'error')
             return render_template('formulario_producto.html', categories=categories, editing=False)
         
-        try:
-            price_int = int(price)
-        except ValueError:
-            price_int = 0
+        # Validar precio para evitar números gigantescos / OverflowError
+        price_int, price_err = validate_price(price)
+        if price_err:
+            flash(price_err, 'error')
+            return render_template('formulario_producto.html', categories=categories, editing=False)
+            
+        # Validar código de barras
+        if barcode:
+            if len(barcode) > 50:
+                flash('El código de barras no puede tener más de 50 caracteres.', 'error')
+                return render_template('formulario_producto.html', categories=categories, editing=False)
+            existing = Product.query.filter_by(store_id=current_user.store_id, barcode=barcode).first()
+            if existing:
+                flash(f'Ya existe un producto con el código de barras "{barcode}": {existing.name}', 'error')
+                return render_template('formulario_producto.html', categories=categories, editing=False)
+                
+        # Validar código PLU
+        if plu_code:
+            if len(plu_code) > 50:
+                flash('El código PLU no puede tener más de 50 caracteres.', 'error')
+                return render_template('formulario_producto.html', categories=categories, editing=False)
+                
+        # Validar stock
+        stock_val = None
+        if stock:
+            if not stock.isdigit():
+                flash('El stock debe ser un número entero.', 'error')
+                return render_template('formulario_producto.html', categories=categories, editing=False)
+            if len(stock) > 6 or int(stock) > 999999:
+                flash('El stock no puede superar las 999.999 unidades.', 'error')
+                return render_template('formulario_producto.html', categories=categories, editing=False)
+            stock_val = int(stock)
             
         image_name = 'default_product.png'
         image_file = request.files.get('image')
@@ -652,15 +685,19 @@ def product_add():
             has_barcode=True if barcode else False,
             sell_by_weight=sell_by_weight,
             weight_unit=weight_unit if sell_by_weight else 'kg',
-            stock=int(stock) if stock else None
+            stock=stock_val
         )
         
-        db.session.add(product)
-        db.session.commit()
-        
-        log_audit('PRODUCT_CREATE', f'Producto creado: "{name}" (ID:{product.id}) - Precio: ${price_int:,} COP', current_user.id)
-        flash(f'Producto "{name}" agregado exitosamente.', 'success')
-        return redirect(url_for('products'))
+        try:
+            db.session.add(product)
+            db.session.commit()
+            log_audit('PRODUCT_CREATE', f'Producto creado: "{name}" (ID:{product.id}) - Precio: ${price_int:,} COP', current_user.id)
+            flash(f'Producto "{name}" agregado exitosamente.', 'success')
+            return redirect(url_for('products'))
+        except Exception as e:
+            db.session.rollback()
+            flash(f'Error al guardar el producto: valores fuera de rango permitido.', 'error')
+            return render_template('formulario_producto.html', categories=categories, editing=False)
         
     return render_template('formulario_producto.html', categories=categories, editing=False)
 
@@ -679,26 +716,63 @@ def product_edit(product_id):
         old_name = product.name
         old_price = product.price
         
-        product.name = request.form.get('name', product.name).strip()
-        product.barcode = request.form.get('barcode', '').strip() or None
-        product.plu_code = request.form.get('plu_code', '').strip() or None
-        product.has_barcode = True if product.barcode else False
-        product.category_id = int(request.form.get('category_id', product.category_id))
-        
+        name = request.form.get('name', product.name).strip()
+        barcode = request.form.get('barcode', '').strip() or None
+        plu_code = request.form.get('plu_code', '').strip() or None
+        price = request.form.get('price', str(product.price))
+        category_id = int(request.form.get('category_id', product.category_id))
         sub_id = request.form.get('subcategory_id', '')
-        product.subcategory_id = int(sub_id) if sub_id else None
-        
-        try:
-            product.price = int(request.form.get('price', product.price))
-        except ValueError:
-            pass
-        
-        product.sell_by_weight = request.form.get('sell_by_weight') == 'on'
+        stock_str = request.form.get('stock', '').strip()
+        sell_by_weight = request.form.get('sell_by_weight') == 'on'
         weight_unit = request.form.get('weight_unit', 'kg')
-        product.weight_unit = weight_unit if product.sell_by_weight else 'kg'
         
-        stock_val = request.form.get('stock', '')
-        product.stock = int(stock_val) if stock_val else None
+        if not name:
+            flash('El nombre del producto es obligatorio.', 'error')
+            return render_template('formulario_producto.html', categories=categories, editing=True, product=product)
+
+        # Validar precio
+        price_int, price_err = validate_price(price)
+        if price_err:
+            flash(price_err, 'error')
+            return render_template('formulario_producto.html', categories=categories, editing=True, product=product)
+
+        # Validar código de barras
+        if barcode:
+            if len(barcode) > 50:
+                flash('El código de barras no puede tener más de 50 caracteres.', 'error')
+                return render_template('formulario_producto.html', categories=categories, editing=True, product=product)
+            existing = Product.query.filter_by(store_id=current_user.store_id, barcode=barcode).first()
+            if existing and existing.id != product.id:
+                flash(f'Ya existe otro producto con el código de barras "{barcode}": {existing.name}', 'error')
+                return render_template('formulario_producto.html', categories=categories, editing=True, product=product)
+
+        # Validar código PLU
+        if plu_code:
+            if len(plu_code) > 50:
+                flash('El código PLU no puede tener más de 50 caracteres.', 'error')
+                return render_template('formulario_producto.html', categories=categories, editing=True, product=product)
+
+        # Validar stock
+        stock_val = None
+        if stock_str:
+            if not stock_str.isdigit():
+                flash('El stock debe ser un número entero.', 'error')
+                return render_template('formulario_producto.html', categories=categories, editing=True, product=product)
+            if len(stock_str) > 6 or int(stock_str) > 999999:
+                flash('El stock no puede superar las 999.999 unidades.', 'error')
+                return render_template('formulario_producto.html', categories=categories, editing=True, product=product)
+            stock_val = int(stock_str)
+        
+        product.name = name
+        product.barcode = barcode
+        product.plu_code = plu_code
+        product.has_barcode = True if barcode else False
+        product.category_id = category_id
+        product.subcategory_id = int(sub_id) if sub_id else None
+        product.price = price_int
+        product.sell_by_weight = sell_by_weight
+        product.weight_unit = weight_unit if sell_by_weight else 'kg'
+        product.stock = stock_val
         
         image_file = request.files.get('image')
         if image_file and image_file.filename:
@@ -706,18 +780,22 @@ def product_edit(product_id):
             if saved:
                 product.image = saved
         
-        db.session.commit()
-        
-        changes = []
-        if old_name != product.name:
-            changes.append(f'nombre: "{old_name}" → "{product.name}"')
-        if old_price != product.price:
-            changes.append(f'precio: ${old_price:,} → ${product.price:,}')
-        change_str = ', '.join(changes) if changes else 'datos actualizados'
-        
-        log_audit('PRODUCT_UPDATE', f'Producto editado (ID:{product.id}): {change_str}', current_user.id)
-        flash(f'Producto "{product.name}" actualizado.', 'success')
-        return redirect(url_for('products'))
+        try:
+            db.session.commit()
+            changes = []
+            if old_name != product.name:
+                changes.append(f'nombre: "{old_name}" → "{product.name}"')
+            if old_price != product.price:
+                changes.append(f'precio: ${old_price:,} → ${product.price:,}')
+            change_str = ', '.join(changes) if changes else 'datos actualizados'
+            
+            log_audit('PRODUCT_UPDATE', f'Producto editado (ID:{product.id}): {change_str}', current_user.id)
+            flash(f'Producto "{product.name}" actualizado.', 'success')
+            return redirect(url_for('products'))
+        except Exception as e:
+            db.session.rollback()
+            flash('Error al actualizar el producto: valores fuera de rango.', 'error')
+            return render_template('formulario_producto.html', categories=categories, editing=True, product=product)
         
     return render_template('formulario_producto.html', categories=categories, editing=True, product=product)
 
