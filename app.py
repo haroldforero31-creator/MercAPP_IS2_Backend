@@ -495,18 +495,10 @@ def logout():
 # ROUTES — SETTINGS / CENTRO DE CONTROL
 # ============================================================
 
-@app.route('/settings', methods=['GET', 'POST'])
+@app.route('/settings')
 @login_required
 def settings():
     """Centro de Control (Configuración General)."""
-    if request.method == 'POST':
-        password = request.form.get('password', '')
-        if password == 'Foreroyulian321.2026':
-            flash('Licencia renovada con éxito por 60 días adicionales.', 'success')
-            log_audit('LICENSE_RENEW', 'Licencia extendida 60 días', current_user.id)
-        else:
-            flash('Contraseña de seguridad incorrecta.', 'error')
-        return redirect(url_for('settings'))
     return render_template('config_hub.html')
 
 @app.route('/settings/store', methods=['GET', 'POST'])
