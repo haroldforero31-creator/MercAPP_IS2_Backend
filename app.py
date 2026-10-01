@@ -26,7 +26,8 @@ app.config['SECRET_KEY'] = 'sprint2-nueva-clave-2026'
 app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(base_dir, 'mercapp.db')}"
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-db = SQLAlchemy(app)
+from models.database import db
+db.init_app(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 
@@ -75,141 +76,9 @@ def color_alpha(color, alpha=0.3):
 # MODELS — Sprint 2 + Sprint 3: Tienda, Configuración, Categorías, Subcategorías, Productos, Auditoría
 # ============================================================
 
-class Store(db.Model):
-    __tablename__ = 'tienda'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.now)
-    is_active = db.Column(db.Boolean, default=True)
-    users = db.relationship('User', backref='store', lazy=True)
-    categories = db.relationship('Category', backref='store', lazy=True)
-    products = db.relationship('Product', backref='store', lazy=True)
-    settings = db.relationship('StoreSettings', backref='store', lazy=True)
+from models.user import Store, StoreSettings, User, Customer, AuditLog
+from models.product import Category, Subcategory, Product
 
-class StoreSettings(db.Model):
-    __tablename__ = 'configuracion_tienda'
-    id = db.Column(db.Integer, primary_key=True)
-    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False)
-    store_name = db.Column(db.String(100), default='MercAPP')
-    logo = db.Column(db.String(200), default='logo.png')
-    qr_transferencia = db.Column(db.String(200), default='')
-    razon_social = db.Column(db.String(200), default='MercAPP S.A.S')
-    nit = db.Column(db.String(20), default='000.000.000-0')
-    rut = db.Column(db.String(30), default='')
-    regimen_tributario = db.Column(db.String(100), default='No responsable de IVA')
-    gran_contribuyente = db.Column(db.String(100), default='')
-    agente_retencion = db.Column(db.String(100), default='')
-    direccion = db.Column(db.String(200), default='')
-    telefono = db.Column(db.String(20), default='')
-    ciudad = db.Column(db.String(100), default='')
-    resolucion_dian = db.Column(db.String(100), default='')
-    resolucion_fecha = db.Column(db.String(50), default='')
-    rango_desde = db.Column(db.String(30), default='MRC-0001')
-    rango_hasta = db.Column(db.String(30), default='MRC-9999')
-    mensaje_ticket = db.Column(db.String(200), default='¡Gracias por su compra!')
-    scale_mode = db.Column(db.String(10), default='manual')  # 'manual' or 'auto'
-    printer_name = db.Column(db.String(200), default='')
-    auto_print = db.Column(db.Boolean, default=True)
-    auto_drawer = db.Column(db.Boolean, default=True)
-    
-    # Theme visual personalization
-    theme_color_primary = db.Column(db.String(20), default='default')
-    theme_color_accent = db.Column(db.String(20), default='default')
-    theme_color_background = db.Column(db.String(20), default='default')
-    theme_font_family = db.Column(db.String(50), default='default')
-    theme_font_size = db.Column(db.String(15), default='default')
-    theme_btn_clear_color = db.Column(db.String(20), default='default')
-    theme_btn_charge_color = db.Column(db.String(20), default='default')
-
-class User(UserMixin, db.Model):
-    __tablename__ = 'usuario'
-    id = db.Column(db.Integer, primary_key=True)
-    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False)
-    name = db.Column(db.String(100), nullable=False)
-    email = db.Column(db.String(120), unique=True, nullable=False)
-    password_hash = db.Column(db.String(255), nullable=False)
-    is_admin = db.Column(db.Boolean, default=True)
-    status = db.Column(db.String(20), default='ACTIVO')  # ACTIVO, INACTIVO, BLOQUEADO
-    failed_attempts = db.Column(db.Integer, default=0)
-    last_login = db.Column(db.DateTime, nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.now)
-
-    def set_password(self, password):
-        self.password_hash = generate_password_hash(password)
-        
-    def check_password(self, password):
-        return check_password_hash(self.password_hash, password)
-
-class Customer(UserMixin, db.Model):
-    __tablename__ = 'cliente'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100))
-    email = db.Column(db.String(100), unique=True)
-    phone = db.Column(db.String(20))
-    address = db.Column(db.String(200))
-    password_hash = db.Column(db.String(255))
-    is_admin = False
-
-    def set_password(self, password):
-        self.password_hash = generate_password_hash(password)
-        
-    def check_password(self, password):
-        return check_password_hash(self.password_hash, password)
-
-class Category(db.Model):
-    __tablename__ = 'categoria'
-    id = db.Column(db.Integer, primary_key=True)
-    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False)
-    name = db.Column(db.String(50), nullable=False)
-    slug = db.Column(db.String(50), nullable=False)
-    image = db.Column(db.String(200), default='default_category.png')
-    description = db.Column(db.String(200))
-    display_order = db.Column(db.Integer, default=0)
-    visible_in_pos = db.Column(db.Boolean, default=True)
-    subcategories = db.relationship('Subcategory', backref='category', lazy=True, cascade='all, delete-orphan')
-    products = db.relationship('Product', backref='category', lazy=True)
-
-class Subcategory(db.Model):
-    __tablename__ = 'subcategoria'
-    id = db.Column(db.Integer, primary_key=True)
-    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False)
-    name = db.Column(db.String(50), nullable=False)
-    slug = db.Column(db.String(50), nullable=False)
-    category_id = db.Column(db.Integer, db.ForeignKey('categoria.id'), nullable=False)
-    image = db.Column(db.String(200), default='default_subcategory.png')
-    display_order = db.Column(db.Integer, default=0)
-    products = db.relationship('Product', backref='subcategory', lazy=True)
-
-class Product(db.Model):
-    __tablename__ = 'producto'
-    id = db.Column(db.Integer, primary_key=True)
-    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False)
-    name = db.Column(db.String(150), nullable=False)
-    barcode = db.Column(db.String(60), nullable=True)
-    price = db.Column(db.Integer, nullable=False)
-    category_id = db.Column(db.Integer, db.ForeignKey('categoria.id'), nullable=False)
-    subcategory_id = db.Column(db.Integer, db.ForeignKey('subcategoria.id'), nullable=True)
-    image = db.Column(db.String(200), default='default_product.png')
-    has_barcode = db.Column(db.Boolean, default=False)
-    stock = db.Column(db.Integer, nullable=True)
-    sell_by_weight = db.Column(db.Boolean, default=False)
-    weight_unit = db.Column(db.String(5), default='kg')  # 'kg' or 'lb'
-    plu_code = db.Column(db.String(60), nullable=True)
-    is_active = db.Column(db.Boolean, default=True)
-    created_at = db.Column(db.DateTime, default=datetime.now)
-
-class AuditLog(db.Model):
-    """Tabla de auditoría APPEND-ONLY: registra quién hizo qué y cuándo."""
-    __tablename__ = 'auditoria'
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('usuario.id'), nullable=True)
-    action = db.Column(db.String(50), nullable=False)
-    description = db.Column(db.Text, nullable=False)
-    ip_address = db.Column(db.String(45), default='127.0.0.1')
-    severity = db.Column(db.String(20), default='INFO')
-    created_at = db.Column(db.DateTime, default=datetime.now)
-    
-    user = db.relationship('User', backref='audit_logs', lazy=True)
 
 
 # ============================================================
@@ -495,18 +364,10 @@ def logout():
 # ROUTES — SETTINGS / CENTRO DE CONTROL
 # ============================================================
 
-@app.route('/settings', methods=['GET', 'POST'])
+@app.route('/settings')
 @login_required
 def settings():
     """Centro de Control (Configuración General)."""
-    if request.method == 'POST':
-        password = request.form.get('password', '')
-        if password == 'Foreroyulian321.2026':
-            flash('Licencia renovada con éxito por 60 días adicionales.', 'success')
-            log_audit('LICENSE_RENEW', 'Licencia extendida 60 días', current_user.id)
-        else:
-            flash('Contraseña de seguridad incorrecta.', 'error')
-        return redirect(url_for('settings'))
     return render_template('config_hub.html')
 
 @app.route('/settings/store', methods=['GET', 'POST'])
@@ -1240,6 +1101,15 @@ def cashiers():
 def settings_hardware():
     flash('El módulo de Hardware estará disponible en el siguiente sprint.', 'info')
     return redirect(url_for('settings'))
+
+# ============================================================
+# API REST BLUEPRINTS (Arquitectura en Capas)
+# ============================================================
+from controllers.user_controller import user_controller
+from controllers.product_controller import product_controller
+
+app.register_blueprint(user_controller)
+app.register_blueprint(product_controller)
 
 
 # ============================================================
