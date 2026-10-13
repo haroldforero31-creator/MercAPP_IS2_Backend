@@ -1580,8 +1580,29 @@ def session_detail(session_id):
     if not session_obj or session_obj.store_id != current_user.store_id:
         flash('Sesión no encontrada.', 'error')
         return redirect(url_for('session_history'))
+    
+    # Sales for this specific session
     sales = Sale.query.filter_by(cash_session_id=session_id).order_by(Sale.sale_date.desc()).all()
-    return render_template('caja_detalle.html', session=session_obj, sales=sales)
+    
+    # Calculate real-time totals from actual sales
+    completed_sales = [s for s in sales if s.status == 'completada']
+    cash_total = sum(
+        (s.amount_cash if s.payment_method == 'mixto' and s.amount_cash else s.total)
+        for s in completed_sales if s.payment_method in ('efectivo', 'mixto')
+    )
+    transfer_total = sum(
+        (s.amount_transfer if s.payment_method == 'mixto' and s.amount_transfer else s.total)
+        for s in completed_sales if s.payment_method in ('transferencia', 'mixto')
+    )
+    card_total = sum(
+        (s.amount_card if s.payment_method == 'mixto' and s.amount_card else s.total)
+        for s in completed_sales if s.payment_method in ('tarjeta', 'mixto')
+    )
+    expected_cash = (session_obj.base_amount or 0) + cash_total
+    
+    return render_template('caja_detalle.html', session_obj=session_obj, session=session_obj, sales=sales,
+                           cash_total=cash_total, transfer_total=transfer_total,
+                           card_total=card_total, expected_cash_live=expected_cash)
 
 
 # ============================================================
