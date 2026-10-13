@@ -99,6 +99,25 @@ def color_alpha(color, alpha=0.3):
     except Exception:
         return color
 
+def clamp_color_darkness(hex_color, max_brightness=140):
+    """Garantiza que un color hexadecimal no sea demasiado claro para mantener contraste con texto blanco."""
+    if not hex_color or hex_color == 'default' or not hex_color.startswith('#') or len(hex_color) != 7:
+        return hex_color
+    try:
+        r = int(hex_color[1:3], 16)
+        g = int(hex_color[3:5], 16)
+        b = int(hex_color[5:7], 16)
+        brightness = 0.299 * r + 0.587 * g + 0.114 * b
+        if brightness > max_brightness and brightness > 0:
+            factor = max_brightness / brightness
+            r = int(r * factor)
+            g = int(g * factor)
+            b = int(b * factor)
+            return f"#{r:02x}{g:02x}{b:02x}"
+        return hex_color
+    except Exception:
+        return hex_color
+
 # ============================================================
 # MODELS — Sprint 2 + Sprint 3: Tienda, Configuración, Categorías, Subcategorías, Productos, Auditoría
 # ============================================================
@@ -277,20 +296,20 @@ def inject_globals():
     global_settings = get_store_settings() if current_user.is_authenticated else None
     theme_vars = {}
     if global_settings:
-        p = global_settings.theme_color_primary
+        p = clamp_color_darkness(global_settings.theme_color_primary, max_brightness=140)
         if p and p != 'default':
             theme_vars['primary'] = p
             theme_vars['primary_light'] = mix_color(p, 'white', 0.85)
             theme_vars['primary_dark'] = mix_color(p, 'black', 0.85)
             theme_vars['primary_glow'] = color_alpha(p, 0.3)
             
-        a = global_settings.theme_color_accent
+        a = clamp_color_darkness(global_settings.theme_color_accent, max_brightness=165)
         if a and a != 'default':
             theme_vars['accent'] = a
             theme_vars['accent_light'] = mix_color(a, 'white', 0.85)
             theme_vars['accent_dark'] = mix_color(a, 'black', 0.85)
             
-        bg = global_settings.theme_color_background
+        bg = clamp_color_darkness(global_settings.theme_color_background, max_brightness=45)
         if bg and bg != 'default':
             theme_vars['bg'] = bg
             theme_vars['bg_card'] = mix_color(bg, 'white', 0.92)
@@ -298,14 +317,14 @@ def inject_globals():
             theme_vars['bg_input'] = mix_color(bg, 'white', 0.96)
             theme_vars['border'] = mix_color(bg, 'white', 0.80)
             
-        btn_clear = global_settings.theme_btn_clear_color
+        btn_clear = clamp_color_darkness(global_settings.theme_btn_clear_color, max_brightness=140)
         if btn_clear and btn_clear != 'default':
             theme_vars['btn_clear_color'] = btn_clear
             theme_vars['btn_clear_bg'] = color_alpha(btn_clear, 0.12)
             theme_vars['btn_clear_border'] = color_alpha(btn_clear, 0.30)
             theme_vars['btn_clear_hover_bg'] = btn_clear
             
-        btn_charge = global_settings.theme_btn_charge_color
+        btn_charge = clamp_color_darkness(global_settings.theme_btn_charge_color, max_brightness=140)
         if btn_charge and btn_charge != 'default':
             theme_vars['btn_charge_color'] = btn_charge
             theme_vars['btn_charge_bg_start'] = mix_color(btn_charge, 'black', 0.80)
@@ -818,14 +837,24 @@ def settings_store():
             img.save(qr_path, quality=90, optimize=True)
             store.qr_transferencia = qr_name
         
-        # Theme visual settings
-        store.theme_color_primary = request.form.get('theme_color_primary', 'default').strip()
-        store.theme_color_accent = request.form.get('theme_color_accent', 'default').strip()
-        store.theme_color_background = request.form.get('theme_color_background', 'default').strip()
+        # Theme visual settings con protección estricta de contraste para texto blanco
+        p_raw = request.form.get('theme_color_primary', 'default').strip()
+        store.theme_color_primary = clamp_color_darkness(p_raw, max_brightness=140)
+        
+        a_raw = request.form.get('theme_color_accent', 'default').strip()
+        store.theme_color_accent = clamp_color_darkness(a_raw, max_brightness=165)
+        
+        bg_raw = request.form.get('theme_color_background', 'default').strip()
+        store.theme_color_background = clamp_color_darkness(bg_raw, max_brightness=45)
+        
         store.theme_font_family = request.form.get('theme_font_family', 'default').strip()
         store.theme_font_size = request.form.get('theme_font_size', 'default').strip()
-        store.theme_btn_clear_color = request.form.get('theme_btn_clear_color', 'default').strip()
-        store.theme_btn_charge_color = request.form.get('theme_btn_charge_color', 'default').strip()
+        
+        clear_raw = request.form.get('theme_btn_clear_color', 'default').strip()
+        store.theme_btn_clear_color = clamp_color_darkness(clear_raw, max_brightness=140)
+        
+        charge_raw = request.form.get('theme_btn_charge_color', 'default').strip()
+        store.theme_btn_charge_color = clamp_color_darkness(charge_raw, max_brightness=140)
         
         db.session.commit()
         log_audit('STORE_SETTINGS_UPDATE', f'Configuración del supermercado actualizada: {store.store_name}', current_user.id)
