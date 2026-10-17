@@ -263,6 +263,199 @@ def send_reset_email(user, token):
         return True
 
 
+def send_credit_sale_invoice(client, sale, sale_items):
+    """Envía la factura por correo al cliente fiado con los productos comprados en esta transacción específica."""
+    if not client or not client.email:
+        return False
+    try:
+        if not app.config.get('MAIL_USERNAME'):
+            return True
+            
+        store = db.session.get(Store, sale.store_id)
+        store_name = store.name if store else "MercAPP"
+        
+        rows_html = ""
+        for si in sale_items:
+            prod_name = si['product'].name
+            if si.get('weight_grams'):
+                qty_str = f"{si['weight_grams']}g ({si.get('weight_unit', 'g')})"
+            else:
+                qty_str = f"{si['quantity']} un"
+            unit_price_str = format_cop(si['unit_price'])
+            subtotal_str = format_cop(si['subtotal'])
+            rows_html += f"""
+            <tr style="border-bottom: 1px solid #2D3344;">
+                <td style="padding: 10px; color: #FFFFFF; font-size: 0.9rem;">{prod_name}</td>
+                <td style="padding: 10px; text-align: center; color: #9AA0A6; font-size: 0.85rem;">{qty_str}</td>
+                <td style="padding: 10px; text-align: right; color: #9AA0A6; font-size: 0.85rem;">{unit_price_str}</td>
+                <td style="padding: 10px; text-align: right; color: #FFA726; font-weight: 600; font-size: 0.9rem;">{subtotal_str}</td>
+            </tr>
+            """
+            
+        sale_date_str = sale.sale_date.strftime('%d/%m/%Y %I:%M %p')
+        total_sale_str = format_cop(sale.total)
+        total_debt_str = format_cop(client.total_debt)
+
+        msg = Message(
+            subject=f"Factura de Compra Fiada #{sale.receipt_number} - {store_name}",
+            recipients=[client.email]
+        )
+        msg.html = f"""
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #121622; color: #E8EAED; border-radius: 16px; overflow: hidden; border: 1px solid #2D3344; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
+            <div style="background: linear-gradient(135deg, #1b5e20, #2E7D32); padding: 24px; text-align: center;">
+                <h1 style="margin: 0; font-size: 1.6rem; color: #FFFFFF; letter-spacing: 0.5px;">{store_name}</h1>
+                <p style="margin: 4px 0 0; color: rgba(255,255,255,0.85); font-size: 0.9rem;">Comprobante Oficial de Compra a Crédito (Fiado)</p>
+            </div>
+
+            <div style="padding: 24px;">
+                <div style="background: rgba(255,255,255,0.03); padding: 14px 18px; border-radius: 10px; border: 1px solid #2D3344; margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between;">
+                        <div>
+                            <div style="color: #9AA0A6; font-size: 0.8rem; text-transform: uppercase;">Cliente</div>
+                            <div style="color: #FFFFFF; font-weight: bold; font-size: 1.05rem;">{client.name}</div>
+                        </div>
+                        <div style="text-align: right;">
+                            <div style="color: #9AA0A6; font-size: 0.8rem; text-transform: uppercase;">Factura N°</div>
+                            <div style="color: #FFA726; font-weight: bold; font-size: 1.05rem;">{sale.receipt_number}</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="color: #9AA0A6; font-size: 0.85rem; margin-bottom: 16px;">
+                    <strong>Fecha y Hora:</strong> {sale_date_str}
+                </div>
+
+                <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
+                    <thead>
+                        <tr style="background: rgba(255,255,255,0.05); border-bottom: 2px solid #2E7D32;">
+                            <th style="padding: 10px; text-align: left; color: #A5D6A7; font-size: 0.85rem;">Producto</th>
+                            <th style="padding: 10px; text-align: center; color: #A5D6A7; font-size: 0.85rem;">Cant.</th>
+                            <th style="padding: 10px; text-align: right; color: #A5D6A7; font-size: 0.85rem;">Precio Unit.</th>
+                            <th style="padding: 10px; text-align: right; color: #A5D6A7; font-size: 0.85rem;">Subtotal</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows_html}
+                    </tbody>
+                </table>
+
+                <div style="background: rgba(0,0,0,0.25); border-radius: 10px; padding: 16px; border: 1px solid #2D3344; margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                        <span style="color: #9AA0A6;">Total de esta compra fiada:</span>
+                        <span style="color: #FFFFFF; font-weight: bold; font-size: 1.1rem;">{total_sale_str}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; padding-top: 8px; border-top: 1px solid #2D3344;">
+                        <span style="color: #FFA726; font-weight: 600;">Saldo total acumulado adeudado:</span>
+                        <span style="color: #FFA726; font-weight: bold; font-size: 1.2rem;">{total_debt_str}</span>
+                    </div>
+                </div>
+
+                <div style="background: rgba(255, 167, 38, 0.08); border-left: 4px solid #FFA726; padding: 12px 16px; border-radius: 6px; font-size: 0.85rem; color: #9AA0A6; line-height: 1.4;">
+                    <strong style="color: #FFA726;">Aviso importante:</strong> Esta factura detalla únicamente los artículos adquiridos en esta transacción. Recuerda realizar al menos un abono antes de 60 días para mantener tu cupo de crédito activo.
+                </div>
+            </div>
+
+            <div style="background: #0B0E14; padding: 16px; text-align: center; font-size: 0.75rem; color: #5F6368; border-top: 1px solid #1F2430;">
+                Comprobante emitido automáticamente por {store_name} a través de la plataforma MercAPP.
+            </div>
+        </div>
+        """
+        mail.send(msg)
+        return True
+    except Exception as e:
+        print(f"[MAIL] Error enviando factura de fiado a {client.email}: {e}")
+        return False
+
+
+def send_credit_payment_receipt(client, payment, previous_debt):
+    """Envía un recibo por correo electrónico al cliente cuando realiza un abono a su deuda."""
+    if not client or not client.email:
+        return False
+    try:
+        if not app.config.get('MAIL_USERNAME'):
+            return True
+            
+        store = db.session.get(Store, client.store_id)
+        store_name = store.name if store else "MercAPP"
+        
+        payment_date_str = payment.payment_date.strftime('%d/%m/%Y %I:%M %p')
+        payment_amount_str = format_cop(payment.amount)
+        previous_debt_str = format_cop(previous_debt)
+        new_debt_str = format_cop(client.total_debt)
+        status_text = "DEUDA TOTALMENTE SALDADA" if client.total_debt <= 0 else "SALDO PENDIENTE"
+        status_color = "#2E7D32" if client.total_debt <= 0 else "#FFA726"
+
+        msg = Message(
+            subject=f"Recibo de Abono a Deuda #{payment.id} - {store_name}",
+            recipients=[client.email]
+        )
+        msg.html = f"""
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #121622; color: #E8EAED; border-radius: 16px; overflow: hidden; border: 1px solid #2D3344; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
+            <div style="background: linear-gradient(135deg, #0D47A1, #1976D2); padding: 24px; text-align: center;">
+                <h1 style="margin: 0; font-size: 1.6rem; color: #FFFFFF; letter-spacing: 0.5px;">{store_name}</h1>
+                <p style="margin: 4px 0 0; color: rgba(255,255,255,0.85); font-size: 0.9rem;">Recibo Oficial de Abono a Deuda</p>
+            </div>
+
+            <div style="padding: 24px;">
+                <div style="background: rgba(255,255,255,0.03); padding: 14px 18px; border-radius: 10px; border: 1px solid #2D3344; margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between;">
+                        <div>
+                            <div style="color: #9AA0A6; font-size: 0.8rem; text-transform: uppercase;">Cliente</div>
+                            <div style="color: #FFFFFF; font-weight: bold; font-size: 1.05rem;">{client.name}</div>
+                        </div>
+                        <div style="text-align: right;">
+                            <div style="color: #9AA0A6; font-size: 0.8rem; text-transform: uppercase;">Recibo N°</div>
+                            <div style="color: #64B5F6; font-weight: bold; font-size: 1.05rem;">REC-{payment.id:05d}</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="color: #9AA0A6; font-size: 0.85rem; margin-bottom: 20px;">
+                    <strong>Fecha y Hora:</strong> {payment_date_str}<br>
+                    <strong>Método de pago:</strong> {payment.payment_method.capitalize()}<br>
+                    {f"<strong>Observaciones:</strong> {payment.notes}<br>" if payment.notes else ""}
+                </div>
+
+                <div style="text-align: center; background: rgba(25, 118, 210, 0.1); border: 2px solid rgba(25, 118, 210, 0.3); border-radius: 12px; padding: 20px; margin-bottom: 24px;">
+                    <div style="color: #90CAF9; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px;">Monto Abonado</div>
+                    <div style="font-size: 2.2rem; font-weight: 800; color: #FFFFFF; margin: 4px 0;">{payment_amount_str}</div>
+                </div>
+
+                <div style="background: rgba(0,0,0,0.25); border-radius: 10px; padding: 16px; border: 1px solid #2D3344; margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                        <span style="color: #9AA0A6;">Deuda anterior:</span>
+                        <span style="color: #E8EAED; font-weight: 600;">{previous_debt_str}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                        <span style="color: #4CAF50;">Abono realizado:</span>
+                        <span style="color: #4CAF50; font-weight: 600;">- {payment_amount_str}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; padding-top: 10px; border-top: 1px solid #2D3344;">
+                        <span style="color: #FFFFFF; font-weight: bold;">Nuevo saldo pendiente:</span>
+                        <span style="color: {status_color}; font-weight: 800; font-size: 1.25rem;">{new_debt_str}</span>
+                    </div>
+                    <div style="text-align: right; margin-top: 6px;">
+                        <span style="display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: bold; background: rgba(46, 125, 50, 0.15); color: {status_color};">{status_text}</span>
+                    </div>
+                </div>
+
+                <div style="background: rgba(46, 125, 50, 0.08); border-left: 4px solid #2E7D32; padding: 12px 16px; border-radius: 6px; font-size: 0.85rem; color: #A5D6A7; line-height: 1.4;">
+                    ¡Muchas gracias por tu abono! Mantener tu cuenta al día te permite seguir disfrutando de las facilidades de crédito en {store_name}.
+                </div>
+            </div>
+
+            <div style="background: #0B0E14; padding: 16px; text-align: center; font-size: 0.75rem; color: #5F6368; border-top: 1px solid #1F2430;">
+                Comprobante emitido automáticamente por MercAPP para {store_name}.
+            </div>
+        </div>
+        """
+        mail.send(msg)
+        return True
+    except Exception as e:
+        print(f"[MAIL] Error enviando recibo de abono a {client.email}: {e}")
+        return False
+
+
 
 # ============================================================
 # USER LOADER & HELPERS
@@ -2218,6 +2411,13 @@ def api_credit_sale():
         client = db.session.get(CreditClient, client_id)
         if not client or client.store_id != current_user.store_id:
             return jsonify({'success': False, 'message': 'Cliente no encontrado.'}), 404
+
+        # Validación de bloqueo por mora (> 2 meses sin abono y con deuda pendiente)
+        if client.is_blocked:
+            return jsonify({
+                'success': False,
+                'message': f'Cliente BLOQUEADO para ventas a crédito: tiene saldo pendiente de {format_cop(client.total_debt)} y lleva {client.days_without_payment} días (más de 2 meses) sin realizar abonos. Debe pagar la totalidad de la deuda para volver a fiar.'
+            }), 400
         
         if not items:
             return jsonify({'success': False, 'message': 'El carrito está vacío.'}), 400
@@ -2357,35 +2557,14 @@ def api_credit_sale():
         
         db.session.commit()
         
-        # Opcional: Notificación por correo electrónico si el cajero lo solicitó
-        send_email_flag = data.get('send_email', False)
+        # Envío automático de factura detallada al correo del cliente
         recipient_email = data.get('email', '').strip()
-        if send_email_flag and recipient_email:
-            try:
-                store = db.session.get(Store, current_user.store_id)
-                store_name = store.name if store else "MercAPP"
-                msg = Message(
-                    subject=f"Comprobante de Venta Fiada - {store_name} (#{sale.receipt_number})",
-                    recipients=[recipient_email]
-                )
-                items_summary = "\n".join([f"- {si['product'].name} x{si['quantity']}: {format_cop(si['subtotal'])}" for si in sale_items])
-                msg.body = f"""Hola {client.name},
-
-Se ha registrado una compra fiada a tu nombre en {store_name}:
-
-Factura: #{sale.receipt_number}
-Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-Total de esta compra: {format_cop(sale.total)}
-Nueva deuda total acumulada: {format_cop(client.total_debt)}
-
-Detalle de productos:
-{items_summary}
-
-¡Gracias por su preferencia!
-"""
-                mail.send(msg)
-            except Exception as mail_err:
-                print(f"[MAIL] Error enviando comprobante de fiado por correo: {mail_err}")
+        if recipient_email and not client.email:
+            client.email = recipient_email
+            db.session.commit()
+            
+        if client.email:
+            send_credit_sale_invoice(client, sale, sale_items)
 
         return jsonify({
             'success': True,
@@ -2452,7 +2631,8 @@ def debts():
         query = query.filter(
             db.or_(
                 CreditClient.name.ilike(f'%{search}%'),
-                CreditClient.phone.ilike(f'%{search}%')
+                CreditClient.phone.ilike(f'%{search}%'),
+                CreditClient.email.ilike(f'%{search}%')
             )
         )
     
@@ -2480,6 +2660,7 @@ def debt_new_client():
     if request.method == 'POST':
         name = request.form.get('name', '').strip()
         phone = request.form.get('phone', '').strip()
+        email = request.form.get('email', '').strip()
         
         if not name or len(name) < 2:
             flash('El nombre del cliente debe tener al menos 2 caracteres.', 'error')
@@ -2488,7 +2669,8 @@ def debt_new_client():
         client = CreditClient(
             store_id=current_user.store_id,
             name=name,
-            phone=phone if phone else None
+            phone=phone if phone else None,
+            email=email if email else None
         )
         db.session.add(client)
         db.session.commit()
@@ -2496,6 +2678,32 @@ def debt_new_client():
         flash(f'Cliente "{name}" creado exitosamente.', 'success')
         return redirect(url_for('debt_client_pos', client_id=client.id))
     
+    return redirect(url_for('debts'))
+
+
+@app.route('/debts/client/<int:client_id>/edit', methods=['POST'])
+@login_required
+@admin_only
+def debt_edit_client(client_id):
+    """Update a credit client's details (name, phone, email)."""
+    client = db.session.get(CreditClient, client_id)
+    if not client or client.store_id != current_user.store_id:
+        flash('Cliente no encontrado.', 'error')
+        return redirect(url_for('debts'))
+        
+    name = request.form.get('name', '').strip()
+    phone = request.form.get('phone', '').strip()
+    email = request.form.get('email', '').strip()
+    
+    if not name or len(name) < 2:
+        flash('El nombre del cliente debe tener al menos 2 caracteres.', 'error')
+        return redirect(url_for('debts'))
+        
+    client.name = name
+    client.phone = phone if phone else None
+    client.email = email if email else None
+    db.session.commit()
+    flash(f'Cliente "{name}" actualizado exitosamente.', 'success')
     return redirect(url_for('debts'))
 
 
@@ -2553,6 +2761,8 @@ def api_credit_payment():
         if amount > client.total_debt:
             return jsonify({'success': False, 'message': f'El monto excede la deuda total ({format_cop(client.total_debt)}).'}), 400
         
+        previous_debt = client.total_debt
+
         # Record the payment
         payment = CreditPayment(
             client_id=client_id,
@@ -2581,12 +2791,17 @@ def api_credit_payment():
         
         db.session.commit()
         
+        # Envío automático de recibo al correo del cliente
+        if client.email:
+            send_credit_payment_receipt(client, payment, previous_debt)
+        
         return jsonify({
             'success': True,
             'message': f'Pago de {format_cop(amount)} registrado exitosamente.',
             'new_total_debt': client.total_debt,
             'new_total_debt_formatted': format_cop(client.total_debt),
-            'debt_status': client.debt_status
+            'debt_status': client.debt_status,
+            'is_blocked': client.is_blocked
         })
         
     except Exception as e:
@@ -3214,6 +3429,14 @@ def api_web_serial_config():
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
+        
+        # Migración segura: agregar columna email si no existe en base de datos SQLite existente
+        try:
+            with db.engine.connect() as conn:
+                conn.execute(db.text("ALTER TABLE cliente_credito ADD COLUMN email VARCHAR(120)"))
+                conn.commit()
+        except Exception:
+            pass
         
         # Seed: crear categorías por defecto para tiendas existentes sin categorías
         stores_without_cats = Store.query.filter(~Store.id.in_(

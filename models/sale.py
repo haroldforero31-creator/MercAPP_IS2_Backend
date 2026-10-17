@@ -65,6 +65,7 @@ class CreditClient(db.Model):
     store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False)
     name = db.Column(db.String(100), nullable=False)
     phone = db.Column(db.String(20), nullable=True)
+    email = db.Column(db.String(120), nullable=True)
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.now)
     credit_sales = db.relationship('CreditSale', backref='client', lazy=True)
@@ -86,6 +87,34 @@ class CreditClient(db.Model):
     @property
     def debt_status(self):
         return 'pagado' if self.total_debt <= 0 else 'pendiente'
+
+    @property
+    def last_activity_date(self):
+        """Fecha del último abono o, si no hay abonos, de la deuda más antigua pendiente."""
+        if self.payments:
+            return max(p.payment_date for p in self.payments)
+        pending = [cs for cs in self.credit_sales if cs.status == 'pendiente']
+        if pending:
+            return min(cs.created_at for cs in pending)
+        return self.created_at
+
+    @property
+    def days_without_payment(self):
+        """Días transcurridos sin hacer al menos un abono a la deuda pendiente."""
+        if self.total_debt <= 0:
+            return 0
+        now = datetime.now()
+        last_date = self.last_activity_date
+        if last_date:
+            return max(0, (now - last_date).days)
+        return 0
+
+    @property
+    def is_blocked(self):
+        """Bloqueado si tiene deuda y lleva 60 días (2 meses) o más sin abonar."""
+        if self.total_debt <= 0:
+            return False
+        return self.days_without_payment >= 60
 
 
 class CreditSale(db.Model):
