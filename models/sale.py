@@ -139,3 +139,55 @@ class CreditPayment(db.Model):
     payment_method = db.Column(db.String(20), default='efectivo')
     payment_date = db.Column(db.DateTime, default=datetime.now)
     notes = db.Column(db.String(200), nullable=True)
+
+
+class Order(db.Model):
+    """Storefront Delivery/Pickup Orders."""
+    __tablename__ = 'pedido'
+    id = db.Column(db.Integer, primary_key=True)
+    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False)
+    customer_id = db.Column(db.Integer, db.ForeignKey('cliente.id'), nullable=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('usuario.id'), nullable=True)
+    sale_id = db.Column(db.Integer, db.ForeignKey('venta.id'), nullable=True)
+    customer_name = db.Column(db.String(100), nullable=False)
+    customer_phone = db.Column(db.String(20), nullable=False)
+    customer_address = db.Column(db.String(200), nullable=True)
+    order_type = db.Column(db.String(20), default='domicilio')    # 'domicilio' o 'recoger'
+    payment_method = db.Column(db.String(20), default='efectivo')
+    delivery_cost = db.Column(db.Integer, default=0)
+    subtotal = db.Column(db.Integer, nullable=False, default=0)
+    total = db.Column(db.Integer, nullable=False, default=0)
+    status = db.Column(db.String(20), default='pendiente')        # 'pendiente', 'confirmado', 'completado', 'cancelado'
+    notes = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    
+    items = db.relationship('OrderItem', backref='order', lazy=True, cascade='all, delete-orphan')
+    notifications = db.relationship('OrderNotification', backref='order', lazy=True, cascade='all, delete-orphan')
+    sale = db.relationship('Sale', backref='linked_order', lazy=True)
+    store = db.relationship('Store', backref='orders', lazy=True)
+    customer = db.relationship('Customer', backref='orders', lazy=True)
+
+
+class OrderItem(db.Model):
+    """Items inside a customer Order."""
+    __tablename__ = 'detalle_pedido'
+    id = db.Column(db.Integer, primary_key=True)
+    order_id = db.Column(db.Integer, db.ForeignKey('pedido.id'), nullable=False)
+    product_id = db.Column(db.Integer, db.ForeignKey('producto.id'), nullable=False)
+    quantity = db.Column(db.Float, nullable=False)
+    unit_price = db.Column(db.Integer, nullable=False)
+    subtotal = db.Column(db.Integer, nullable=False)
+    weight_grams = db.Column(db.Integer, nullable=True)
+    weight_unit = db.Column(db.String(5), nullable=True)
+    product = db.relationship('Product', backref='order_items_rel')
+
+
+class OrderNotification(db.Model):
+    """Internal notifications sent by Admin to Customer regarding an order."""
+    __tablename__ = 'notificacion_pedido'
+    id = db.Column(db.Integer, primary_key=True)
+    order_id = db.Column(db.Integer, db.ForeignKey('pedido.id'), nullable=False)
+    message = db.Column(db.Text, nullable=False)
+    is_read = db.Column(db.Boolean, default=False, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+

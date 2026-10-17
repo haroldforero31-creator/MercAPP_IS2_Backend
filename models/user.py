@@ -84,11 +84,32 @@ class Customer(UserMixin, db.Model):
     password_hash = db.Column(db.String(255))
     is_admin = False
 
+    created_at = db.Column(db.DateTime, default=datetime.now)
+
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
         
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
+
+    def get_id(self):
+        return f"customer_{self.id}"
+
+
+class CustomerEmailVerification(db.Model):
+    """Temporary email verification during customer registration."""
+    __tablename__ = 'verificacion_email_cliente'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    email = db.Column(db.String(120), nullable=False)
+    phone = db.Column(db.String(20), nullable=False)
+    address = db.Column(db.String(200), nullable=True)
+    password_hash = db.Column(db.String(256), nullable=False)
+    code = db.Column(db.String(10), nullable=False)
+    verified = db.Column(db.Boolean, default=False)
+    attempts = db.Column(db.Integer, default=0)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.now)
 
 
 class AuditLog(db.Model):
