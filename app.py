@@ -158,6 +158,22 @@ def admin_only(f):
         return f(*args, **kwargs)
     return decorated_function
 
+
+@app.context_processor
+def inject_globals():
+    """Inject cashier_mode, active_cashier_name and global_settings into all templates."""
+    global_settings = None
+    if current_user.is_authenticated and isinstance(current_user, User):
+        global_settings = StoreSettings.query.filter_by(store_id=current_user.store_id).first()
+        
+    return {
+        'cashier_mode': is_cashier_mode() if current_user.is_authenticated and isinstance(current_user, User) else False,
+        'active_cashier_name': session.get('active_cashier_name', None),
+        'active_cashier_id': session.get('active_cashier_id', None),
+        'global_settings': global_settings
+    }
+
+
 def get_today_session():
     """Get the active cash session for the current calendar day."""
     if not current_user.is_authenticated or not hasattr(current_user, 'store_id'):
@@ -2611,6 +2627,225 @@ def api_settings_printer():
 
 
 
+# ============================================================
+# CASHIER MANAGEMENT (Gestión de Cajeros)
+# ============================================================
+
+@app.route('/cashiers')
+@login_required
+@admin_only
+def cashiers():
+    """List all cashiers for the current store."""
+    store_cashiers = User.query.filter_by(store_id=current_user.store_id, is_admin=False).all()
+    settings = get_store_settings()
+    return render_template('cajeros.html', cashiers=store_cashiers, settings=settings)
+
+
+@app.route('/cashiers/activate/<int:cashier_id>', methods=['POST'])
+@login_required
+@admin_only
+def cashier_activate(cashier_id):
+    """Activate cashier mode for a specific cashier."""
+    cashier = User.query.filter_by(id=cashier_id, store_id=current_user.store_id, is_admin=False).first_or_404()
+    if not cashier.is_active_cashier:
+        return jsonify({'success': False, 'message': 'Este cajero está desactivado.'}), 400
+    
+    session['cashier_mode'] = True
+    session['active_cashier_id'] = cashier.id
+    session['active_cashier_name'] = cashier.name
+    
+    log_audit('CASHIER_MODE_ACTIVATE', f'Modo cajero activado: {cashier.name}', current_user.id)
+    return jsonify({'success': True, 'message': f'Modo cajero activado para {cashier.name}'})
+
+
+@app.route('/cashiers/deactivate', methods=['POST'])
+@login_required
+def cashier_deactivate():
+    """Deactivate cashier mode and return to admin mode."""
+    cashier_name = session.get('active_cashier_name', 'Cajero')
+    session.pop('cashier_mode', None)
+    session.pop('active_cashier_id', None)
+    session.pop('active_cashier_name', None)
+    log_audit('CASHIER_MODE_DEACTIVATE', f'Modo cajero desactivado ({cashier_name})', current_user.id)
+    return jsonify({'success': True, 'message': 'Modo cajero desactivado'})
+
+
+@app.route('/cashiers/add', methods=['POST'])
+@login_required
+@admin_only
+def cashier_add():
+    """Create a new cashier for the current store."""
+    username = request.form.get('username', '').strip()
+    password = request.form.get('password', '').strip()
+    
+    if not username or not password:
+        flash('Nombre y contraseña son obligatorios.', 'error')
+        return redirect(url_for('cashiers'))
+    
+    if len(password) < 4:
+        flash('La contraseña debe tener al menos 4 caracteres.', 'error')
+        return redirect(url_for('cashiers'))
+    
+    # Check if username already exists in this store
+    existing = User.query.filter_by(store_id=current_user.store_id, username=username).first()
+    if existing:
+        flash(f'Ya existe un cajero con el nombre "{username}".', 'error')
+        return redirect(url_for('cashiers'))
+    
+    cashier = User(
+        store_id=current_user.store_id,
+        name=username,
+        username=username,
+        email=f"cashier_{username.lower().replace(' ', '_')}_{current_user.store_id}@mercapp.local",
+        is_admin=False,
+        is_active_cashier=True
+    )
+    cashier.set_password(password)
+    db.session.add(cashier)
+    db.session.commit()
+    
+    log_audit('CASHIER_CREATE', f'Cajero creado: {username} (ID: {cashier.id})', current_user.id)
+    flash(f'Cajero "{username}" creado exitosamente.', 'success')
+    return redirect(url_for('cashiers'))
+
+
+@app.route('/cashiers/<int:cashier_id>/edit', methods=['POST'])
+@login_required
+@admin_only
+def cashier_edit(cashier_id):
+    """Edit a cashier's name or password."""
+    cashier = db.session.get(User, cashier_id)
+    if not cashier or cashier.store_id != current_user.store_id or cashier.is_admin:
+        flash('Cajero no encontrado.', 'error')
+        return redirect(url_for('cashiers'))
+    
+    new_name = request.form.get('username', '').strip()
+    new_password = request.form.get('password', '').strip()
+    
+    if new_name and new_name != cashier.username:
+        existing = User.query.filter_by(store_id=current_user.store_id, username=new_name).first()
+        if existing and existing.id != cashier.id:
+            flash(f'Ya existe un cajero con el nombre "{new_name}".', 'error')
+            return redirect(url_for('cashiers'))
+        cashier.username = new_name
+        cashier.name = new_name
+    
+    if new_password:
+        if len(new_password) < 4:
+            flash('La contraseña debe tener al menos 4 caracteres.', 'error')
+            return redirect(url_for('cashiers'))
+        cashier.set_password(new_password)
+    
+    db.session.commit()
+    log_audit('CASHIER_UPDATE', f'Cajero editado: {cashier.username} (ID: {cashier.id})', current_user.id)
+    flash(f'Cajero "{cashier.username}" actualizado.', 'success')
+    return redirect(url_for('cashiers'))
+
+
+@app.route('/cashiers/<int:cashier_id>/toggle', methods=['POST'])
+@login_required
+@admin_only
+def cashier_toggle(cashier_id):
+    """Toggle a cashier's active status."""
+    cashier = db.session.get(User, cashier_id)
+    if not cashier or cashier.store_id != current_user.store_id or cashier.is_admin:
+        flash('Cajero no encontrado.', 'error')
+        return redirect(url_for('cashiers'))
+    
+    cashier.is_active_cashier = not cashier.is_active_cashier
+    db.session.commit()
+    
+    status = 'activado' if cashier.is_active_cashier else 'desactivado'
+    log_audit('CASHIER_TOGGLE', f'Cajero {status}: {cashier.username} (ID: {cashier.id})', current_user.id)
+    flash(f'Cajero "{cashier.username}" {status}.', 'success')
+    return redirect(url_for('cashiers'))
+
+
+@app.route('/cashiers/<int:cashier_id>/delete', methods=['POST'])
+@login_required
+@admin_only
+def cashier_delete(cashier_id):
+    """Delete a cashier (only if they have no sales)."""
+    cashier = db.session.get(User, cashier_id)
+    if not cashier or cashier.store_id != current_user.store_id or cashier.is_admin:
+        flash('Cajero no encontrado.', 'error')
+        return redirect(url_for('cashiers'))
+    
+    # Check if cashier has any sales
+    sale_count = Sale.query.filter_by(user_id=cashier.id).count()
+    if sale_count > 0:
+        flash(f'No se puede eliminar a "{cashier.username}" porque tiene {sale_count} ventas registradas. Puedes desactivarlo en su lugar.', 'error')
+        return redirect(url_for('cashiers'))
+    
+    username = cashier.username
+    db.session.delete(cashier)
+    db.session.commit()
+    log_audit('CASHIER_DELETE', f'Cajero eliminado: {username} (ID: {cashier_id})', current_user.id, 'WARNING')
+    flash(f'Cajero "{username}" eliminado exitosamente.', 'success')
+    return redirect(url_for('cashiers'))
+
+
+@app.route('/cashiers/sales')
+@login_required
+@admin_only
+def cashier_sales():
+    """View sales history by cashier, organized by day."""
+    from datetime import date as date_cls
+    
+    selected_date = request.args.get('date')
+    selected_cashier = request.args.get('cashier_id', type=int)
+    
+    if selected_date:
+        try:
+            view_date = datetime.strptime(selected_date, '%Y-%m-%d').date()
+        except ValueError:
+            view_date = date_cls.today()
+    else:
+        view_date = date_cls.today()
+    
+    # Get all cashiers for this store
+    store_cashiers = User.query.filter_by(store_id=current_user.store_id, is_admin=False).all()
+    settings = get_store_settings()
+    
+    # Build sales data per cashier for the selected date
+    cashier_data = []
+    for c in store_cashiers:
+        day_start = datetime.combine(view_date, datetime.min.time())
+        day_end = datetime.combine(view_date, datetime.max.time())
+        
+        sales = Sale.query.filter(
+            Sale.user_id == c.id,
+            Sale.sale_date >= day_start,
+            Sale.sale_date <= day_end,
+            Sale.status == 'completada'
+        ).order_by(Sale.sale_date.desc()).all()
+        
+        total = sum(s.total for s in sales)
+        
+        # Get session info
+        cash_session = CashSession.query.filter(
+            CashSession.user_id == c.id,
+            CashSession.opened_at >= day_start,
+            CashSession.opened_at <= day_end
+        ).first()
+        
+        cashier_data.append({
+            'cashier': c,
+            'sales': sales,
+            'total': total,
+            'sale_count': len(sales),
+            'session': cash_session
+        })
+    
+    return render_template('cajeros_ventas.html',
+                          cashier_data=cashier_data,
+                          view_date=view_date,
+                          selected_cashier=selected_cashier,
+                          cashiers=store_cashiers,
+                          settings=settings)
+
+
+
 @app.route('/orders')
 @login_required
 def orders():
@@ -3430,10 +3665,22 @@ if __name__ == '__main__':
     with app.app_context():
         db.create_all()
         
-        # Migración segura: agregar columna email si no existe en base de datos SQLite existente
+        # Migración segura: agregar columnas si no existen en base de datos SQLite existente
         try:
             with db.engine.connect() as conn:
                 conn.execute(db.text("ALTER TABLE cliente_credito ADD COLUMN email VARCHAR(120)"))
+                conn.commit()
+        except Exception:
+            pass
+        try:
+            with db.engine.connect() as conn:
+                conn.execute(db.text("ALTER TABLE usuario ADD COLUMN username VARCHAR(50)"))
+                conn.commit()
+        except Exception:
+            pass
+        try:
+            with db.engine.connect() as conn:
+                conn.execute(db.text("ALTER TABLE usuario ADD COLUMN is_active_cashier BOOLEAN DEFAULT 1"))
                 conn.commit()
         except Exception:
             pass
