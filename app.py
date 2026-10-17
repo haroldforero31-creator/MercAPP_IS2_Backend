@@ -129,7 +129,11 @@ def clamp_color_darkness(hex_color, max_brightness=140):
 
 def is_cashier_mode():
     """Check if the current session is in cashier mode."""
-    return session.get('cashier_mode', False)
+    if session.get('cashier_mode', False):
+        return True
+    if current_user.is_authenticated and isinstance(current_user, User) and not getattr(current_user, 'is_admin', True):
+        return True
+    return False
 
 def get_active_cashier():
     """Get the active cashier User object, or None."""
@@ -159,20 +163,6 @@ def admin_only(f):
         return f(*args, **kwargs)
     return decorated_function
 
-
-@app.context_processor
-def inject_globals():
-    """Inject cashier_mode, active_cashier_name and global_settings into all templates."""
-    global_settings = None
-    if current_user.is_authenticated and isinstance(current_user, User):
-        global_settings = StoreSettings.query.filter_by(store_id=current_user.store_id).first()
-        
-    return {
-        'cashier_mode': is_cashier_mode() if current_user.is_authenticated and isinstance(current_user, User) else False,
-        'active_cashier_name': session.get('active_cashier_name', None),
-        'active_cashier_id': session.get('active_cashier_id', None),
-        'global_settings': global_settings
-    }
 
 
 def get_today_session():
@@ -547,10 +537,27 @@ def inject_globals():
             theme_vars['btn_charge_hover_bg_end'] = mix_color(btn_charge, 'white', 0.80)
             theme_vars['btn_charge_hover_glow'] = color_alpha(btn_charge, 0.50)
 
+    active_name = session.get('active_cashier_name')
+    active_id = session.get('active_cashier_id')
+    if current_user.is_authenticated and isinstance(current_user, User):
+        if not current_user.is_admin:
+            if not active_name:
+                active_name = current_user.username or current_user.name
+            if not active_id:
+                active_id = current_user.id
+
+    pending_orders = 0
+    if current_user.is_authenticated and hasattr(current_user, 'store_id') and current_user.store_id:
+        try:
+            pending_orders = Order.query.filter_by(store_id=current_user.store_id, status='pendiente').count()
+        except Exception:
+            pending_orders = 0
+
     return dict(
-        cashier_mode=False,
-        active_cashier_name='',
-        pending_orders_count=0,
+        cashier_mode=is_cashier_mode() if current_user.is_authenticated and isinstance(current_user, User) else False,
+        active_cashier_name=active_name,
+        active_cashier_id=active_id,
+        pending_orders_count=pending_orders,
         global_settings=global_settings,
         theme_vars=theme_vars
     )
@@ -635,34 +642,53 @@ def index():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if current_user.is_authenticated:
-        return redirect(url_for('settings'))
+        return redirect(url_for('pos'))
         
     if request.method == 'POST':
-        email = request.form.get('email')
-        password = request.form.get('password')
-        user = User.query.filter_by(email=email).first()
+        email_or_user = (request.form.get('email') or '').strip()
+        password = request.form.get('password', '')
+        user = User.query.filter(
+            db.or_(User.email == email_or_user.lower(), User.username == email_or_user)
+        ).first()
         
         if user and user.check_password(password):
             if user.status == 'BLOQUEADO':
                 flash('Tu cuenta está bloqueada. Contacta al administrador.', 'error')
-                log_audit('LOGIN_BLOCKED', f'Intento de login con cuenta bloqueada: {email}', user.id, 'WARNING')
+                log_audit('LOGIN_BLOCKED', f'Intento de login con cuenta bloqueada: {email_or_user}', user.id, 'WARNING')
                 return render_template('inicio_sesion.html')
             
             user.failed_attempts = 0
             user.last_login = datetime.now()
             db.session.commit()
-            login_user(user)
-            log_audit('LOGIN', f'Inicio de sesión exitoso para {user.name} ({user.email})', user.id)
-            return redirect(url_for('settings'))
+
+            # If user is cashier (not admin)
+            if not user.is_admin:
+                if not getattr(user, 'is_active_cashier', True):
+                    flash('Este cajero está desactivado. Contacta al administrador.', 'error')
+                    return render_template('inicio_sesion.html')
+                session['cashier_mode'] = True
+                session['active_cashier_id'] = user.id
+                session['active_cashier_name'] = user.username or user.name
+                login_user(user)
+                log_audit('LOGIN_CASHIER', f'Inicio de sesión de cajero {user.name}', user.id)
+                return redirect(url_for('pos'))
+            else:
+                # User is admin: ensure cashier mode is clear
+                session.pop('cashier_mode', None)
+                session.pop('active_cashier_id', None)
+                session.pop('active_cashier_name', None)
+                login_user(user)
+                log_audit('LOGIN', f'Inicio de sesión exitoso para administrador {user.name} ({user.email})', user.id)
+                return redirect(url_for('pos'))
         else:
             if user:
                 user.failed_attempts += 1
                 if user.failed_attempts >= 5:
                     user.status = 'BLOQUEADO'
-                    log_audit('ACCOUNT_LOCKED', f'Cuenta bloqueada por {user.failed_attempts} intentos fallidos: {email}', user.id, 'CRITICAL')
+                    log_audit('ACCOUNT_LOCKED', f'Cuenta bloqueada por {user.failed_attempts} intentos fallidos: {email_or_user}', user.id, 'CRITICAL')
                 db.session.commit()
-            log_audit('LOGIN_FAILED', f'Intento de login fallido para: {email}', user.id if user else None, 'WARNING')
-            flash('Email o contraseña incorrectos.', 'error')
+            log_audit('LOGIN_FAILED', f'Intento de login fallido para: {email_or_user}', user.id if user else None, 'WARNING')
+            flash('Usuario o contraseña incorrectos.', 'error')
             
     return render_template('inicio_sesion.html')
 
@@ -1276,7 +1302,6 @@ def api_customer_read_notifications(order_id):
 
 @app.route('/orders')
 @login_required
-@admin_only
 def orders():
     """Manage store customer orders."""
     active_orders = Order.query.filter(
@@ -1453,7 +1478,6 @@ def api_get_order(order_id):
 
 @app.route('/api/order/<int:order_id>/status', methods=['POST'])
 @login_required
-@admin_only
 def api_update_order_status(order_id):
     """Update order status and optionally send internal notification message."""
     order = db.session.get(Order, order_id)
@@ -1498,12 +1522,14 @@ def logout():
 
 @app.route('/settings')
 @login_required
+@admin_only
 def settings():
     """Centro de Control (Configuración General)."""
     return render_template('config_hub.html')
 
 @app.route('/settings/store', methods=['GET', 'POST'])
 @login_required
+@admin_only
 def settings_store():
     """Datos del Supermercado y Personalización Visual."""
     store = get_store_settings()
@@ -3128,13 +3154,22 @@ def api_credit_sale():
 @app.route('/api/verify-admin-pin', methods=['POST'])
 @login_required
 def api_verify_admin_pin():
-    """Verificar contraseña de admin para desbloquear desde modo cajero."""
+    """Verify administrator password/PIN to exit cashier mode."""
     data = request.get_json() or {}
-    pin = data.get('pin', '')
-    if current_user.check_password(pin):
-        session['admin_unlocked'] = True
-        return jsonify({'success': True})
-    return jsonify({'success': False, 'message': 'Contraseña incorrecta.'}), 403
+    pin = data.get('password') or data.get('pin') or ''
+    
+    if not pin:
+        return jsonify({'success': False, 'message': 'Contraseña requerida.'}), 400
+        
+    admin = User.query.filter_by(store_id=current_user.store_id, is_admin=True).first()
+    if not admin:
+        return jsonify({'success': False, 'message': 'Administrador no encontrado.'}), 404
+        
+    if admin.check_password(pin):
+        session['admin_pin_verified'] = True
+        return jsonify({'success': True, 'message': 'PIN correcto.'})
+    else:
+        return jsonify({'success': False, 'message': 'Contraseña incorrecta.'}), 401
 
 
 @app.route('/api/settings/printer', methods=['GET', 'POST'])
@@ -3177,10 +3212,10 @@ def cashier_activate(cashier_id):
     
     session['cashier_mode'] = True
     session['active_cashier_id'] = cashier.id
-    session['active_cashier_name'] = cashier.name
+    session['active_cashier_name'] = cashier.username or cashier.name
     
-    log_audit('CASHIER_MODE_ACTIVATE', f'Modo cajero activado: {cashier.name}', current_user.id)
-    return jsonify({'success': True, 'message': f'Modo cajero activado para {cashier.name}'})
+    log_audit('CASHIER_MODE_ACTIVATE', f'Modo cajero activado: {cashier.username or cashier.name}', current_user.id)
+    return jsonify({'success': True, 'message': f'Modo cajero activado para {cashier.username or cashier.name}'})
 
 
 @app.route('/cashiers/deactivate', methods=['POST'])
@@ -3188,9 +3223,25 @@ def cashier_activate(cashier_id):
 def cashier_deactivate():
     """Deactivate cashier mode and return to admin mode."""
     cashier_name = session.get('active_cashier_name', 'Cajero')
+    
+    # If current user is cashier (not admin), ensure PIN was verified and switch session to store admin
+    if not current_user.is_admin:
+        if not session.get('admin_pin_verified'):
+            data = request.get_json() or {}
+            pin = data.get('password') or data.get('pin') or ''
+            admin = User.query.filter_by(store_id=current_user.store_id, is_admin=True).first()
+            if not admin or not pin or not admin.check_password(pin):
+                return jsonify({'success': False, 'message': 'Contraseña de administrador requerida.'}), 401
+                
+        admin = User.query.filter_by(store_id=current_user.store_id, is_admin=True).first()
+        if admin:
+            login_user(admin)
+            
     session.pop('cashier_mode', None)
     session.pop('active_cashier_id', None)
     session.pop('active_cashier_name', None)
+    session.pop('admin_pin_verified', None)
+    
     log_audit('CASHIER_MODE_DEACTIVATE', f'Modo cajero desactivado ({cashier_name})', current_user.id)
     return jsonify({'success': True, 'message': 'Modo cajero desactivado'})
 
