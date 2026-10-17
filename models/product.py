@@ -44,5 +44,6 @@ class Product(db.Model):
     sell_by_weight = db.Column(db.Boolean, default=False)
     weight_unit = db.Column(db.String(5), default='kg')  # 'kg' or 'lb'
     plu_code = db.Column(db.String(60), nullable=True)
+    sale_count = db.Column(db.Integer, default=0)
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.now)

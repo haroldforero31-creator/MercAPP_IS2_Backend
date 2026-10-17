@@ -1,6 +1,7 @@
 from models.database import db
-from models.user import Store, StoreSettings, User, Customer, AuditLog
+from models.user import Store, StoreSettings, User, Customer, AuditLog, EmailVerification, PasswordReset
 from models.product import Category, Subcategory, Product
+from models.sale import CashSession, Sale, SaleItem, CreditClient, CreditSale, CreditPayment
 
 __all__ = [
     'db',
@@ -9,7 +10,15 @@ __all__ = [
     'User',
     'Customer',
     'AuditLog',
+    'EmailVerification',
+    'PasswordReset',
     'Category',
     'Subcategory',
-    'Product'
+    'Product',
+    'CashSession',
+    'Sale',
+    'SaleItem',
+    'CreditClient',
+    'CreditSale',
+    'CreditPayment'
 ]

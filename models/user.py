@@ -14,6 +14,8 @@ class Store(db.Model):
     categories = db.relationship('Category', backref='store', lazy=True)
     products = db.relationship('Product', backref='store', lazy=True)
     settings = db.relationship('StoreSettings', backref='store', lazy=True)
+    sales = db.relationship('Sale', backref='store', lazy=True)
+    sessions = db.relationship('CashSession', backref='store', lazy=True)
 
 
 class StoreSettings(db.Model):
@@ -98,3 +100,30 @@ class AuditLog(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now)
     
     user = db.relationship('User', backref='audit_logs', lazy=True)
+
+
+class EmailVerification(db.Model):
+    """Temporary email verification during registration."""
+    __tablename__ = 'verificacion_email'
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(120), nullable=False)
+    code = db.Column(db.String(10), nullable=False)
+    store_name = db.Column(db.String(100), nullable=False)
+    user_name = db.Column(db.String(100), nullable=False)
+    password_hash = db.Column(db.String(256), nullable=False)
+    verified = db.Column(db.Boolean, default=False)
+    attempts = db.Column(db.Integer, default=0)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+
+
+class PasswordReset(db.Model):
+    """Tokens for password recovery."""
+    __tablename__ = 'recuperacion_contrasena'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('usuario.id'), nullable=False)
+    token = db.Column(db.String(100), unique=True, nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    used = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    user = db.relationship('User', backref='password_resets')
