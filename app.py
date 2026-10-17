@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, send_from_directory, jsonify, make_response, session, Response
+from flask import Flask, render_template, request, redirect, url_for, flash, send_from_directory, jsonify, make_response, session, Response, abort
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import joinedload
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
@@ -44,9 +44,10 @@ app.config['MAIL_DEFAULT_SENDER'] = ('MercAPP', os.getenv('MAIL_USERNAME', 'merc
 mail = Mail(app)
 
 from models import (
-    db, Store, StoreSettings, User, Customer, AuditLog,
+    db, Store, StoreSettings, User, Customer, CustomerEmailVerification, AuditLog,
     EmailVerification, PasswordReset, Category, Subcategory, Product,
-    CashSession, Sale, SaleItem, CreditClient, CreditSale, CreditPayment
+    CashSession, Sale, SaleItem, CreditClient, CreditSale, CreditPayment,
+    Order, OrderItem, OrderNotification
 )
 db.init_app(app)
 login_manager = LoginManager(app)
@@ -479,6 +480,9 @@ def send_credit_payment_receipt(client, payment, previous_debt):
 
 @login_manager.user_loader
 def load_user(user_id):
+    if str(user_id).startswith('customer_'):
+        cid = int(str(user_id).split('_')[1])
+        return db.session.get(Customer, cid)
     user = db.session.get(User, int(user_id))
     if user:
         return user
@@ -929,43 +933,548 @@ def reset_password(token):
         
     return render_template('reset_password.html', token=token)
 
-@app.route('/customer/login', endpoint='customer_login', methods=['GET', 'POST'])
-def customer_login_view():
-    if request.method == 'POST':
-        email = request.form.get('email')
-        password = request.form.get('password')
-        customer = Customer.query.filter_by(email=email).first()
-        
-        if customer and customer.check_password(password):
-            login_user(customer)
-            return redirect(url_for('dashboard'))
-        else:
-            flash('Email o contraseña incorrectos.', 'error')
-            
-    return render_template('customer_login.html')
+# ====================================================================
+# CUSTOMER STOREFRONT & ORDERS (B2C)
+# ====================================================================
 
+@app.before_request
+def restrict_customer_access():
+    """Restringir acceso para que clientes solo vean rutas de tienda/pedidos y administradores vean el POS."""
+    if current_user.is_authenticated and isinstance(current_user, Customer):
+        allowed_prefixes = ('/c/', '/customer/', '/api/c/', '/api/customer/', '/static/', '/logout')
+        if not any(request.path.startswith(prefix) for prefix in allowed_prefixes) and request.path != '/logout':
+            return redirect(url_for('customer_stores'))
+            
+    if current_user.is_authenticated and isinstance(current_user, User):
+        customer_prefixes = ('/c/', '/customer/', '/api/c/', '/api/customer/')
+        exempt_paths = (
+            '/c/login', '/customer/login',
+            '/c/register', '/customer/register',
+            '/c/verify-email', '/customer/verify-email',
+            '/c/resend-code', '/customer/resend-code',
+            '/c/logout', '/customer/logout'
+        )
+        if any(request.path.startswith(prefix) for prefix in customer_prefixes) and request.path not in exempt_paths:
+            return redirect(url_for('pos'))
+
+
+@app.route('/c/register', methods=['GET', 'POST'])
 @app.route('/customer/register', endpoint='customer_register', methods=['GET', 'POST'])
 def customer_register_view():
-    if request.method == 'POST':
-        name = request.form.get('name')
-        email = request.form.get('email')
-        phone = request.form.get('phone')
-        address = request.form.get('address')
-        password = request.form.get('password')
+    if current_user.is_authenticated and isinstance(current_user, Customer):
+        return redirect(url_for('customer_stores'))
         
+    if request.method == 'POST':
+        name = request.form.get('name', '').strip()
+        email = request.form.get('email', '').strip().lower()
+        phone = request.form.get('phone', '').strip()
+        address = request.form.get('address', '').strip()
+        password = request.form.get('password', '')
+        
+        if not name or not email or not phone or not password:
+            flash('Por favor completa todos los campos obligatorios.', 'error')
+            return render_template('customer_register.html')
+            
         if Customer.query.filter_by(email=email).first():
             flash('El correo ya está registrado.', 'error')
             return redirect(url_for('customer_register'))
             
-        new_customer = Customer(name=name, email=email, phone=phone, address=address)
-        new_customer.set_password(password)
-        db.session.add(new_customer)
+        code = ''.join([str(secrets.randbelow(10)) for _ in range(6)])
+        verification = CustomerEmailVerification(
+            name=name,
+            email=email,
+            phone=phone,
+            address=address,
+            password_hash=generate_password_hash(password),
+            code=code,
+            expires_at=datetime.now() + timedelta(minutes=10)
+        )
+        db.session.add(verification)
         db.session.commit()
         
-        flash('Registro exitoso. Ahora puedes iniciar sesión como cliente.', 'success')
-        return redirect(url_for('customer_login'))
-        
+        if send_verification_email(email, code):
+            session['pending_customer_verification_email'] = email
+            flash('Se ha enviado un código de verificación de 6 dígitos a tu correo.', 'success')
+            return redirect(url_for('customer_verify_email'))
+        else:
+            flash('Error al enviar el correo de verificación. Intenta nuevamente.', 'error')
+            return render_template('customer_register.html')
+            
     return render_template('customer_register.html')
+
+
+@app.route('/c/verify-email', methods=['GET', 'POST'])
+@app.route('/customer/verify-email', endpoint='customer_verify_email', methods=['GET', 'POST'])
+def customer_verify_email():
+    if current_user.is_authenticated and isinstance(current_user, Customer):
+        return redirect(url_for('customer_stores'))
+        
+    pending_email = session.get('pending_customer_verification_email')
+    if not pending_email:
+        flash('No hay verificación de cliente pendiente. Regístrate primero.', 'error')
+        return redirect(url_for('customer_register'))
+        
+    verification = CustomerEmailVerification.query.filter_by(
+        email=pending_email, verified=False
+    ).order_by(CustomerEmailVerification.created_at.desc()).first()
+    
+    if not verification:
+        session.pop('pending_customer_verification_email', None)
+        flash('Verificación no encontrada. Regístrate de nuevo.', 'error')
+        return redirect(url_for('customer_register'))
+        
+    expired = datetime.now() > verification.expires_at
+    
+    if request.method == 'POST':
+        entered_code = request.form.get('code', '').strip()
+        
+        if expired:
+            flash('El código ha expirado. Solicita uno nuevo.', 'error')
+            return render_template('customer_verificar_email.html', email=pending_email, expired=True)
+            
+        if verification.attempts >= 5:
+            flash('Demasiados intentos fallidos. Solicita un nuevo código.', 'error')
+            return render_template('customer_verificar_email.html', email=pending_email, expired=True)
+            
+        if entered_code == verification.code:
+            verification.verified = True
+            customer = Customer(
+                name=verification.name,
+                email=verification.email,
+                phone=verification.phone,
+                address=verification.address,
+                password_hash=verification.password_hash
+            )
+            db.session.add(customer)
+            db.session.commit()
+            
+            session.pop('pending_customer_verification_email', None)
+            login_user(customer)
+            flash(f'¡Bienvenido {customer.name}! Tu cuenta ha sido activada.', 'success')
+            return redirect(url_for('customer_stores'))
+        else:
+            verification.attempts += 1
+            db.session.commit()
+            flash('Código de verificación incorrecto.', 'error')
+            return render_template('customer_verificar_email.html', email=pending_email, expired=False)
+            
+    return render_template('customer_verificar_email.html', email=pending_email, expired=expired)
+
+
+@app.route('/c/resend-code', methods=['POST'])
+@app.route('/customer/resend-code', endpoint='customer_resend_code', methods=['POST'])
+def customer_resend_code():
+    pending_email = session.get('pending_customer_verification_email')
+    if not pending_email:
+        flash('No hay verificación pendiente.', 'error')
+        return redirect(url_for('customer_register'))
+        
+    verification = CustomerEmailVerification.query.filter_by(
+        email=pending_email, verified=False
+    ).order_by(CustomerEmailVerification.created_at.desc()).first()
+    
+    if not verification:
+        flash('Verificación no encontrada.', 'error')
+        return redirect(url_for('customer_register'))
+        
+    code = ''.join([str(secrets.randbelow(10)) for _ in range(6)])
+    verification.code = code
+    verification.attempts = 0
+    verification.expires_at = datetime.now() + timedelta(minutes=10)
+    db.session.commit()
+    
+    send_verification_email(pending_email, code)
+    flash('Se ha enviado un nuevo código de verificación a tu correo.', 'success')
+    return redirect(url_for('customer_verify_email'))
+
+
+@app.route('/c/login', methods=['GET', 'POST'])
+@app.route('/customer/login', endpoint='customer_login', methods=['GET', 'POST'])
+def customer_login_view():
+    if current_user.is_authenticated and isinstance(current_user, Customer):
+        return redirect(url_for('customer_stores'))
+        
+    if request.method == 'POST':
+        email = request.form.get('email', '').strip().lower()
+        password = request.form.get('password', '')
+        customer = Customer.query.filter_by(email=email).first()
+        
+        if customer and customer.check_password(password):
+            login_user(customer)
+            flash(f'¡Bienvenido de nuevo, {customer.name}!', 'success')
+            return redirect(url_for('customer_stores'))
+        else:
+            flash('Correo o contraseña incorrectos.', 'error')
+            
+    return render_template('customer_login.html')
+
+
+@app.route('/c/logout')
+@app.route('/customer/logout', endpoint='customer_logout')
+@login_required
+def customer_logout():
+    logout_user()
+    flash('Has cerrado sesión correctamente.', 'success')
+    return redirect(url_for('customer_login'))
+
+
+@app.route('/c/stores')
+@app.route('/customer/stores', endpoint='customer_stores')
+@login_required
+def customer_stores():
+    if not isinstance(current_user, Customer):
+        return redirect(url_for('login'))
+    stores = Store.query.filter_by(is_active=True).all()
+    return render_template('customer_stores.html', stores=stores)
+
+
+@app.route('/c/store/<int:store_id>', endpoint='customer_store')
+@app.route('/customer/catalog/<int:store_id>', endpoint='customer_catalog')
+@login_required
+def customer_store(store_id):
+    if not isinstance(current_user, Customer):
+        return redirect(url_for('login'))
+    store = db.session.get(Store, store_id)
+    if not store:
+        abort(404)
+    
+    categories = Category.query.filter_by(store_id=store_id).order_by(Category.display_order.asc(), Category.name.asc()).all()
+    products = Product.query.filter_by(store_id=store_id, is_active=True).order_by(Product.name.asc()).all()
+    
+    return render_template('customer_catalog.html', store=store, categories=categories, products=products)
+
+
+@app.route('/api/c/order', methods=['POST'])
+@app.route('/api/customer/order', endpoint='api_customer_order', methods=['POST'])
+@login_required
+def api_customer_order():
+    if not isinstance(current_user, Customer):
+        return jsonify({'success': False, 'error': 'No autorizado'}), 403
+        
+    data = request.get_json()
+    if not data:
+        return jsonify({'success': False, 'error': 'Datos vacíos'}), 400
+        
+    store_id = data.get('store_id')
+    items = data.get('items', [])
+    order_type = data.get('order_type', 'domicilio')
+    payment_method = data.get('payment_method', 'efectivo')
+    
+    store = db.session.get(Store, store_id)
+    if not store:
+        return jsonify({'success': False, 'error': 'Tienda no encontrada'}), 404
+        
+    if not items:
+        return jsonify({'success': False, 'error': 'El carrito está vacío'}), 400
+        
+    subtotal = 0
+    order_items = []
+    
+    for item in items:
+        product_id = item.get('id')
+        qty = float(item.get('qty', 1))
+        
+        product = db.session.get(Product, product_id)
+        if not product or not product.is_active or product.store_id != store_id:
+            return jsonify({'success': False, 'error': 'Producto no disponible'}), 400
+            
+        weight_grams = None
+        weight_unit = None
+        if getattr(product, 'sell_by_weight', False):
+            item_subtotal = round_to_50(product.price * qty)
+            weight_grams = int(qty * 1000) if product.weight_unit == 'kg' else int(qty * 500)
+            weight_unit = product.weight_unit
+        else:
+            item_subtotal = int(product.price * qty)
+            
+        subtotal += item_subtotal
+        
+        order_item = OrderItem(
+            product_id=product.id,
+            quantity=qty,
+            unit_price=product.price,
+            subtotal=item_subtotal,
+            weight_grams=weight_grams,
+            weight_unit=weight_unit
+        )
+        order_items.append(order_item)
+        
+    total = subtotal
+    
+    order = Order(
+        store_id=store_id,
+        customer_id=current_user.id,
+        customer_name=current_user.name,
+        customer_phone=current_user.phone,
+        customer_address=current_user.address if order_type == 'domicilio' else '',
+        order_type=order_type,
+        payment_method=payment_method,
+        delivery_cost=0,
+        subtotal=subtotal,
+        total=total,
+        status='pendiente',
+        items=order_items
+    )
+    
+    db.session.add(order)
+    db.session.commit()
+    
+    return jsonify({'success': True, 'order_id': order.id})
+
+
+@app.route('/c/orders')
+@app.route('/customer/orders', endpoint='customer_orders')
+@login_required
+def customer_orders():
+    if not isinstance(current_user, Customer):
+        return redirect(url_for('login'))
+        
+    orders = Order.query.filter_by(customer_id=current_user.id).order_by(Order.created_at.desc()).all()
+    return render_template('customer_orders.html', orders=orders)
+
+
+@app.route('/api/c/order/<int:order_id>/cancel', methods=['POST'])
+@app.route('/api/customer/order/<int:order_id>/cancel', endpoint='api_customer_cancel_order', methods=['POST'])
+@login_required
+def api_customer_cancel_order(order_id):
+    if not isinstance(current_user, Customer):
+        return jsonify({'success': False, 'error': 'No autorizado'}), 403
+        
+    order = db.session.get(Order, order_id)
+    if not order or order.customer_id != current_user.id:
+        return jsonify({'success': False, 'error': 'Pedido no encontrado'}), 404
+        
+    if order.status != 'pendiente':
+        return jsonify({'success': False, 'error': 'Solo se pueden cancelar pedidos pendientes'}), 400
+        
+    order.status = 'cancelado'
+    db.session.commit()
+    return jsonify({'success': True})
+
+
+@app.route('/api/c/order/<int:order_id>/read-notifications', methods=['POST'])
+@app.route('/api/customer/order/<int:order_id>/read-notifications', endpoint='api_customer_read_notifications', methods=['POST'])
+@login_required
+def api_customer_read_notifications(order_id):
+    if not isinstance(current_user, Customer):
+        return jsonify({'success': False, 'error': 'No autorizado'}), 403
+        
+    order = db.session.get(Order, order_id)
+    if not order or order.customer_id != current_user.id:
+        return jsonify({'success': False, 'error': 'Pedido no encontrado'}), 404
+        
+    unread_notifs = OrderNotification.query.filter_by(order_id=order_id, is_read=False).all()
+    for n in unread_notifs:
+        n.is_read = True
+    db.session.commit()
+    return jsonify({'success': True})
+
+
+# ====================================================================
+# ADMIN STORE ORDERS ROUTES
+# ====================================================================
+
+@app.route('/orders')
+@login_required
+@admin_only
+def orders():
+    """Manage store customer orders."""
+    active_orders = Order.query.filter(
+        Order.store_id == current_user.store_id,
+        Order.status.in_(['pendiente', 'confirmado'])
+    ).order_by(Order.created_at.desc()).all()
+    
+    now = datetime.now()
+    history_start = now - timedelta(days=2)
+    history_orders = Order.query.filter(
+        Order.store_id == current_user.store_id,
+        Order.status.in_(['completado', 'cancelado']),
+        Order.created_at >= history_start
+    ).order_by(Order.created_at.desc()).all()
+    
+    return render_template('pedidos.html', active_orders=active_orders, history_orders=history_orders)
+
+
+@app.route('/api/order', methods=['POST'])
+@login_required
+def api_create_order():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'message': 'Datos inválidos.'}), 400
+            
+        items = data.get('items', [])
+        customer_name = data.get('customer_name', '').strip()
+        customer_phone = data.get('customer_phone', '').strip()
+        
+        if not items:
+            return jsonify({'success': False, 'message': 'El carrito está vacío.'}), 400
+        if not customer_name or not customer_phone:
+            return jsonify({'success': False, 'message': 'Nombre y teléfono son requeridos.'}), 400
+            
+        order_type = data.get('order_type', 'domicilio')
+        customer_address = data.get('customer_address', '').strip() if order_type == 'domicilio' else None
+        
+        delivery_cost = int(data.get('delivery_cost', 0))
+        payment_method = data.get('payment_method', 'efectivo')
+        notes = data.get('notes', '').strip()
+        
+        subtotal = 0
+        order_items = []
+        
+        for item in items:
+            if item.get('is_custom'):
+                custom_name = item.get('custom_name', 'Varios').strip()
+                if not custom_name: custom_name = 'Varios'
+                custom_price = int(item.get('custom_price', 0))
+                
+                fallback_cat = Category.query.filter_by(store_id=current_user.store_id).first()
+                product = Product(
+                    store_id=current_user.store_id,
+                    name=f"Varios - {custom_name}",
+                    price=custom_price,
+                    category_id=fallback_cat.id if fallback_cat else 1,
+                    is_active=False,
+                    barcode='__CUSTOM__'
+                )
+                db.session.add(product)
+                db.session.flush()
+            else:
+                product = db.session.get(Product, item.get('product_id'))
+                if not product or product.store_id != current_user.store_id:
+                    return jsonify({'success': False, 'message': 'Producto no encontrado.'}), 400
+                    
+            if getattr(product, 'sell_by_weight', False) and not item.get('is_custom'):
+                weight_grams = item.get('weight_grams', 0)
+                if product.weight_unit == 'lb':
+                    item_subtotal = round_to_50(product.price * (weight_grams / 500.0))
+                else:
+                    item_subtotal = round_to_50(product.price * (weight_grams / 1000.0))
+                
+                subtotal += item_subtotal
+                order_items.append(OrderItem(
+                    product_id=product.id,
+                    quantity=1,
+                    unit_price=product.price,
+                    subtotal=item_subtotal,
+                    weight_grams=weight_grams,
+                    weight_unit=product.weight_unit
+                ))
+            else:
+                quantity = item.get('quantity', 0)
+                item_subtotal = product.price * quantity
+                subtotal += item_subtotal
+                
+                order_items.append(OrderItem(
+                    product_id=product.id,
+                    quantity=quantity,
+                    unit_price=product.price,
+                    subtotal=item_subtotal
+                ))
+                
+        total = subtotal + delivery_cost
+        
+        order = Order(
+            store_id=current_user.store_id,
+            user_id=get_effective_user_id(),
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            customer_address=customer_address,
+            order_type=order_type,
+            payment_method=payment_method,
+            delivery_cost=delivery_cost,
+            subtotal=subtotal,
+            total=total,
+            status='pendiente',
+            notes=notes
+        )
+        db.session.add(order)
+        db.session.flush()
+        
+        for oi in order_items:
+            oi.order_id = order.id
+            db.session.add(oi)
+            
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Pedido guardado exitosamente.',
+            'order_id': order.id,
+            'total_formatted': format_cop(total)
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
+
+
+@app.route('/api/order/<int:order_id>', methods=['GET'])
+@login_required
+def api_get_order(order_id):
+    """Get order details to load into POS."""
+    order = db.session.get(Order, order_id)
+    if not order or order.store_id != current_user.store_id:
+        return jsonify({'success': False, 'message': 'Pedido no encontrado.'}), 404
+        
+    items = []
+    for item in order.items:
+        items.append({
+            'product_id': item.product.id,
+            'name': item.product.name,
+            'barcode': item.product.barcode,
+            'price': item.unit_price,
+            'price_formatted': format_cop(item.unit_price),
+            'quantity': item.quantity,
+            'subtotal': item.subtotal,
+            'subtotal_formatted': format_cop(item.subtotal),
+            'weight_grams': item.weight_grams,
+            'weight_unit': item.weight_unit,
+            'sell_by_weight': item.product.sell_by_weight,
+            'is_custom': item.product.barcode == '__CUSTOM__'
+        })
+        
+    return jsonify({
+        'success': True,
+        'order': {
+            'id': order.id,
+            'customer_name': order.customer_name,
+            'customer_phone': order.customer_phone,
+            'order_type': order.order_type,
+            'delivery_cost': order.delivery_cost,
+            'subtotal': order.subtotal,
+            'total': order.total,
+            'payment_method': order.payment_method,
+            'notes': order.notes,
+            'items': items
+        }
+    })
+
+
+@app.route('/api/order/<int:order_id>/status', methods=['POST'])
+@login_required
+@admin_only
+def api_update_order_status(order_id):
+    """Update order status and optionally send internal notification message."""
+    order = db.session.get(Order, order_id)
+    if not order or order.store_id != current_user.store_id:
+        return jsonify({'success': False, 'message': 'Pedido no encontrado.'}), 404
+        
+    data = request.get_json() or {}
+    new_status = data.get('status')
+    message = data.get('message', '').strip()
+    
+    if new_status in ['pendiente', 'confirmado', 'completado', 'cancelado']:
+        order.status = new_status
+        
+        if message:
+            notif = OrderNotification(order_id=order.id, message=message)
+            db.session.add(notif)
+            
+        db.session.commit()
+        return jsonify({'success': True})
+        
+    return jsonify({'success': False, 'message': 'Estado inválido.'}), 400
 
 @app.route('/dashboard')
 @login_required
@@ -2368,6 +2877,14 @@ def api_process_sale():
                 if not prod.sell_by_weight and prod.stock is not None:
                     prod.stock -= si['quantity']
                     
+        # Link order if provided
+        order_id = pay_data.get('order_id') or (request.get_json() or {}).get('order_id')
+        if order_id:
+            order = db.session.get(Order, order_id)
+            if order and order.store_id == current_user.store_id:
+                order.sale_id = sale.id
+                order.status = 'completado'
+
         db.session.commit()
         log_audit('SALE_COMPLETED', f'Venta {sale.receipt_number} realizada por {format_cop(sale.total)} ({sale.payment_method})', current_user.id)
         
@@ -2571,6 +3088,14 @@ def api_credit_sale():
         )
         db.session.add(credit_sale)
         
+        # Link order if provided
+        order_id = data.get('order_id')
+        if order_id:
+            order = db.session.get(Order, order_id)
+            if order and order.store_id == current_user.store_id:
+                order.sale_id = sale.id
+                order.status = 'completado'
+
         db.session.commit()
         
         # Envío automático de factura detallada al correo del cliente
@@ -2844,14 +3369,6 @@ def cashier_sales():
                           cashiers=store_cashiers,
                           settings=settings)
 
-
-
-@app.route('/orders')
-@login_required
-def orders():
-    flash('El módulo de pedidos en línea estará disponible en el siguiente sprint.', 'info')
-    return redirect(url_for('settings'))
-
 @app.route('/debts')
 @login_required
 @admin_only
@@ -3064,12 +3581,6 @@ def debt_client_invoice(client_id):
                            pending_sales=pending_sales, paid_sales=paid_sales,
                            credit_sales=all_credit_sales, payments=payments,
                            now=datetime.now())
-
-@app.route('/cashiers')
-@login_required
-def cashiers():
-    flash('El módulo de administración de cajeros estará disponible en el siguiente sprint.', 'info')
-    return redirect(url_for('settings'))
 
 # ============================================================
 # API REST BLUEPRINTS (Arquitectura en Capas)
@@ -3681,6 +4192,12 @@ if __name__ == '__main__':
         try:
             with db.engine.connect() as conn:
                 conn.execute(db.text("ALTER TABLE usuario ADD COLUMN is_active_cashier BOOLEAN DEFAULT 1"))
+                conn.commit()
+        except Exception:
+            pass
+        try:
+            with db.engine.connect() as conn:
+                conn.execute(db.text("ALTER TABLE cliente ADD COLUMN created_at DATETIME"))
                 conn.commit()
         except Exception:
             pass
