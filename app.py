@@ -864,6 +864,52 @@ def settings_store():
     return render_template('configuracion.html', store=store)
 
 
+@app.route('/settings/hardware', methods=['GET', 'POST'])
+@login_required
+def settings_hardware():
+    """Hardware configuration (scale mode, etc.)."""
+    settings = get_store_settings()
+    
+    if request.method == 'POST':
+        settings.scale_mode = request.form.get('scale_mode', 'manual')
+        if settings.scale_mode not in ('manual', 'auto'):
+            settings.scale_mode = 'manual'
+        db.session.commit()
+        flash('Configuración de hardware guardada.', 'success')
+        return redirect(url_for('settings_hardware'))
+    
+    return render_template('hardware_config.html', settings=settings)
+
+
+@app.route('/api/settings/printer', methods=['GET', 'POST'])
+@login_required
+def api_printer_settings():
+    """Save/load printer config from database (persistent across updates)."""
+    settings = get_store_settings()
+    
+    if request.method == 'POST':
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'message': 'Datos inválidos.'}), 400
+        
+        if 'printer_name' in data:
+            settings.printer_name = data['printer_name'] or ''
+        if 'auto_print' in data:
+            settings.auto_print = bool(data['auto_print'])
+        if 'auto_drawer' in data:
+            settings.auto_drawer = bool(data['auto_drawer'])
+        
+        db.session.commit()
+        return jsonify({'success': True, 'message': 'Configuración de impresora guardada.'})
+    
+    return jsonify({
+        'success': True,
+        'printer_name': settings.printer_name or '',
+        'auto_print': settings.auto_print if settings.auto_print is not None else True,
+        'auto_drawer': settings.auto_drawer if settings.auto_drawer is not None else True
+    })
+
+
 # ============================================================
 # ROUTES — PRODUCT MANAGEMENT (Sprint 2 & 3 Completo)
 # ============================================================
@@ -2385,39 +2431,6 @@ def api_settings_printer():
     return jsonify({'success': True, 'printer_name': settings.printer_name if settings else ''})
 
 
-# ============================================================
-# API HARDWARE STUBS / FALLBACKS
-# ============================================================
-
-@app.route('/api/hardware/printers')
-@login_required
-def api_hardware_printers():
-    return jsonify({'success': False, 'message': 'Impresión nativa directa disponible mediante el diálogo del navegador.'}), 200
-
-@app.route('/api/hardware/ports')
-@login_required
-def api_hardware_ports():
-    return jsonify({'success': True, 'ports': []})
-
-@app.route('/api/hardware/open-drawer', methods=['POST'])
-@login_required
-def api_hardware_open_drawer():
-    return jsonify({'success': True, 'message': 'Cajón monedero listo.'})
-
-@app.route('/api/hardware/print', methods=['POST'])
-@login_required
-def api_hardware_print():
-    return jsonify({'success': True, 'message': 'Usa la vista de factura para imprimir térmico.'})
-
-@app.route('/api/hardware/weight')
-@login_required
-def api_hardware_weight():
-    return jsonify({'success': False, 'message': 'Modo báscula manual activo.'})
-
-@app.route('/api/hardware/detect-scale')
-@login_required
-def api_hardware_detect_scale():
-    return jsonify({'success': False, 'message': 'No se detectó báscula física. Se usará entrada manual de peso.'})
 
 @app.route('/orders')
 @login_required
@@ -2608,12 +2621,6 @@ def cashiers():
     flash('El módulo de administración de cajeros estará disponible en el siguiente sprint.', 'info')
     return redirect(url_for('settings'))
 
-@app.route('/settings/hardware')
-@login_required
-def settings_hardware():
-    flash('El módulo de Hardware estará disponible en el siguiente sprint.', 'info')
-    return redirect(url_for('settings'))
-
 # ============================================================
 # API REST BLUEPRINTS (Arquitectura en Capas)
 # ============================================================
@@ -2624,6 +2631,580 @@ from controllers.sale_controller import sale_controller
 app.register_blueprint(user_controller)
 app.register_blueprint(product_controller)
 app.register_blueprint(sale_controller)
+
+
+# ============================================================
+# HARDWARE API (SAT POS & Scale)
+# ============================================================
+# Hardware imports: solo disponibles en Windows (escritorio)
+try:
+    import serial
+    import serial.tools.list_ports
+    import win32print
+    import unidecode
+    HW_AVAILABLE = True
+except ImportError:
+    HW_AVAILABLE = False
+
+LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+os.makedirs(LOGS_DIR, exist_ok=True)
+
+
+@app.route('/api/hardware/printers', methods=['GET'])
+@login_required
+def api_hardware_printers():
+    if not HW_AVAILABLE:
+        return jsonify({'success': False, 'message': 'Hardware nativo no disponible. Usa impresión por navegador.'}), 501
+    try:
+        printers = [printer[2] for printer in win32print.EnumPrinters(2)]
+        return jsonify({'success': True, 'printers': printers})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/hardware/ports', methods=['GET'])
+@login_required
+def api_hardware_ports():
+    if not HW_AVAILABLE:
+        return jsonify({'success': False, 'message': 'Hardware nativo no disponible. Usa Web Serial API.'}), 501
+    try:
+        ports = []
+        for port in serial.tools.list_ports.comports():
+            ports.append({
+                'device': port.device,
+                'description': port.description,
+                'hwid': port.hwid
+            })
+        return jsonify({'success': True, 'ports': ports})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/hardware/open-drawer', methods=['POST'])
+@login_required
+def api_hardware_open_drawer():
+    if not HW_AVAILABLE:
+        return jsonify({'success': False, 'message': 'Hardware nativo no disponible.'}), 501
+    data = request.get_json()
+    printer_name = data.get('printer_name')
+    if not printer_name:
+        return jsonify({'success': False, 'message': 'Impresora no especificada.'}), 400
+    try:
+        hPrinter = win32print.OpenPrinter(printer_name)
+        try:
+            cmd = b'\x1B\x70\x00\x19\xFA'
+            win32print.StartDocPrinter(hPrinter, 1, ("OpenDrawer", None, "RAW"))
+            try:
+                win32print.StartPagePrinter(hPrinter)
+                win32print.WritePrinter(hPrinter, cmd)
+                win32print.EndPagePrinter(hPrinter)
+            finally:
+                win32print.EndDocPrinter(hPrinter)
+            return jsonify({'success': True})
+        finally:
+            win32print.ClosePrinter(hPrinter)
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/hardware/print', methods=['POST'])
+@login_required
+def api_hardware_print():
+    if not HW_AVAILABLE:
+        return jsonify({'success': False, 'message': 'Hardware nativo no disponible. Usa impresión por navegador.'}), 501
+    data = request.get_json()
+    printer_name = data.get('printer_name')
+    if not printer_name:
+        return jsonify({'success': False, 'message': 'Impresora no especificada.'}), 400
+    
+    sale_id = data.get('sale_id')
+    sale = db.session.get(Sale, sale_id)
+    if not sale:
+        return jsonify({'success': False, 'message': 'Venta no encontrada.'}), 404
+        
+    settings = get_store_settings()
+    
+    try:
+        ESC = b'\x1b'
+        GS = b'\x1d'
+        INIT = ESC + b'@'
+        ALIGN_CENTER = ESC + b'a\x01'
+        ALIGN_LEFT = ESC + b'a\x00'
+        BOLD_ON = ESC + b'E\x01'
+        BOLD_OFF = ESC + b'E\x00'
+        CUT = GS + b'V\x42\x00'
+        
+        lines = []
+        def add_line(text, center=False, bold=False):
+            cmd = b''
+            if center: cmd += ALIGN_CENTER
+            else: cmd += ALIGN_LEFT
+            if bold: cmd += BOLD_ON
+            
+            safe_text = unidecode.unidecode(text)
+            cmd += safe_text.encode('ascii', errors='replace') + b'\n'
+            
+            if bold: cmd += BOLD_OFF
+            lines.append(cmd)
+            
+        lines.append(INIT)
+        add_line(settings.store_name, center=True, bold=True)
+        add_line(f"NIT: {settings.nit}", center=True)
+        add_line(f"Dir: {settings.direccion}", center=True)
+        add_line(f"Tel: {settings.telefono}", center=True)
+        add_line("------------------------------------------", center=True)
+        add_line(f"Factura: {sale.receipt_number}")
+        add_line(f"Fecha: {sale.sale_date.strftime('%Y-%m-%d %H:%M')}")
+        add_line(f"Cajero: {sale.cashier.name}")
+        add_line("------------------------------------------", center=True)
+        
+        for item in sale.items:
+            name = item.product.name[:22]
+            qty = f"{item.quantity}" if not item.weight_grams else f"{item.weight_grams/1000}kg"
+            
+            val2 = item.subtotal
+            subt_f = f"${val2:,.0f}".replace(',', '.')
+            
+            add_line(f"{name:<22} {qty:>6} {subt_f:>10}")
+            
+        add_line("------------------------------------------", center=True)
+        add_line(f"TOTAL:                     {f'${sale.total:,.0f}'.replace(',', '.')}", bold=True)
+        add_line(f"Pago:                      {sale.payment_method.capitalize()}")
+        add_line(f"Recibido:                  {f'${sale.amount_received:,.0f}'.replace(',', '.')}")
+        add_line(f"Cambio:                    {f'${sale.change_given:,.0f}'.replace(',', '.')}")
+        add_line("------------------------------------------", center=True)
+        add_line(settings.mensaje_ticket, center=True)
+        add_line(" ", center=True)
+        add_line(" ", center=True)
+        lines.append(CUT)
+        
+        raw_data = b''.join(lines)
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Error preparando ticket: {str(e)}'}), 500
+    
+    import threading
+    def _send_to_printer(pname, data_bytes):
+        try:
+            hPrinter = win32print.OpenPrinter(pname)
+            try:
+                win32print.StartDocPrinter(hPrinter, 1, ("ImpresionPOS", None, "RAW"))
+                try:
+                    win32print.StartPagePrinter(hPrinter)
+                    win32print.WritePrinter(hPrinter, data_bytes)
+                    win32print.EndPagePrinter(hPrinter)
+                finally:
+                    win32print.EndDocPrinter(hPrinter)
+            finally:
+                win32print.ClosePrinter(hPrinter)
+        except Exception as ex:
+            app.logger.error(f"Background print error: {ex}")
+    
+    threading.Thread(target=_send_to_printer, args=(printer_name, raw_data), daemon=True).start()
+    return jsonify({'success': True})
+
+
+@app.route('/api/hardware/print-summary', methods=['POST'])
+@login_required
+def api_hardware_print_summary():
+    if not HW_AVAILABLE:
+        return jsonify({'success': False, 'message': 'Hardware nativo no disponible.'}), 501
+    
+    data = request.get_json()
+    printer_name = data.get('printer_name')
+    if not printer_name:
+        return jsonify({'success': False, 'message': 'Impresora no especificada.'}), 400
+        
+    date_from_str = data.get('date_from', '')
+    date_to_str = data.get('date_to', '')
+    method_filter = data.get('method', '')
+    
+    query = Sale.query.filter_by(store_id=current_user.store_id, status='completada')
+    
+    label_fecha = "Resumen General"
+    
+    if date_from_str:
+        try:
+            df = datetime.strptime(date_from_str, '%Y-%m-%d')
+            query = query.filter(Sale.sale_date >= df)
+            label_fecha = f"Desde: {date_from_str}"
+        except ValueError:
+            pass
+            
+    if date_to_str:
+        try:
+            dt = datetime.strptime(date_to_str, '%Y-%m-%d')
+            dt = dt.replace(hour=23, minute=59, second=59)
+            query = query.filter(Sale.sale_date <= dt)
+            label_fecha += f" Hasta: {date_to_str}"
+        except ValueError:
+            pass
+            
+    if method_filter:
+        query = query.filter_by(payment_method=method_filter)
+        label_fecha += f" ({method_filter})"
+        
+    if not date_from_str and not date_to_str:
+        label_fecha = f"Hoy: {datetime.now().strftime('%Y-%m-%d')}"
+        today = datetime.now()
+        df = datetime(today.year, today.month, today.day)
+        query = query.filter(Sale.sale_date >= df)
+        
+    sales = query.all()
+    
+    cash = sum(s.total for s in sales if s.payment_method == 'efectivo')
+    transfer = sum(s.total for s in sales if s.payment_method == 'transferencia')
+    card = sum(s.total for s in sales if s.payment_method == 'tarjeta')
+    total = sum(s.total for s in sales)
+    count = len(sales)
+    
+    settings = get_store_settings()
+    
+    try:
+        hPrinter = win32print.OpenPrinter(printer_name)
+        try:
+            ESC = b'\x1b'
+            GS = b'\x1d'
+            INIT = ESC + b'@'
+            ALIGN_CENTER = ESC + b'a\x01'
+            ALIGN_LEFT = ESC + b'a\x00'
+            BOLD_ON = ESC + b'E\x01'
+            BOLD_OFF = ESC + b'E\x00'
+            CUT = GS + b'V\x42\x00'
+            
+            lines = []
+            def add_line(text, center=False, bold=False):
+                cmd = b''
+                if center: cmd += ALIGN_CENTER
+                else: cmd += ALIGN_LEFT
+                if bold: cmd += BOLD_ON
+                
+                safe_text = unidecode.unidecode(text)
+                cmd += safe_text.encode('ascii', errors='replace') + b'\n'
+                
+                if bold: cmd += BOLD_OFF
+                lines.append(cmd)
+                
+            lines.append(INIT)
+            add_line(settings.store_name, center=True, bold=True)
+            add_line("RESUMEN DE VENTAS", center=True, bold=True)
+            add_line("------------------------------------------", center=True)
+            add_line(label_fecha, center=True)
+            add_line(f"Generado: {datetime.now().strftime('%H:%M:%S')}", center=True)
+            add_line("------------------------------------------", center=True)
+            
+            add_line(f"Cant. Facturas: {count}")
+            add_line(" ")
+            
+            def fmt_val(v):
+                return f"${v:,.0f}".replace(',', '.')
+                
+            add_line(f"Efectivo:      {fmt_val(cash):>15}", bold=True)
+            add_line(f"Transferencia: {fmt_val(transfer):>15}")
+            add_line(f"Tarjeta:       {fmt_val(card):>15}")
+            add_line("------------------------------------------", center=True)
+            add_line(f"TOTAL VENTAS:  {fmt_val(total):>15}", bold=True)
+            add_line("------------------------------------------", center=True)
+            add_line(" ", center=True)
+            add_line(" ", center=True)
+            
+            lines.append(CUT)
+            
+            raw_data = b''.join(lines)
+            
+            win32print.StartDocPrinter(hPrinter, 1, ("ImpresionPOS_Z", None, "RAW"))
+            try:
+                win32print.StartPagePrinter(hPrinter)
+                win32print.WritePrinter(hPrinter, raw_data)
+                win32print.EndPagePrinter(hPrinter)
+            finally:
+                win32print.EndDocPrinter(hPrinter)
+            return jsonify({'success': True})
+        finally:
+            win32print.ClosePrinter(hPrinter)
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/hardware/print-debt', methods=['POST'])
+@login_required
+def api_hardware_print_debt():
+    if not HW_AVAILABLE:
+        return jsonify({'success': False, 'message': 'Hardware nativo no disponible. Usa impresión por navegador.'}), 501
+    data = request.get_json()
+    printer_name = data.get('printer_name')
+    if not printer_name:
+        return jsonify({'success': False, 'message': 'Impresora no especificada.'}), 400
+    
+    client_id = data.get('client_id')
+    client = db.session.get(CreditClient, client_id)
+    if not client:
+        return jsonify({'success': False, 'message': 'Cliente no encontrado.'}), 404
+        
+    settings = get_store_settings()
+    credit_sales = CreditSale.query.filter_by(client_id=client_id).order_by(CreditSale.created_at.asc()).all()
+    payments = CreditPayment.query.filter_by(client_id=client_id).order_by(CreditPayment.payment_date.asc()).all()
+    
+    try:
+        hPrinter = win32print.OpenPrinter(printer_name)
+        try:
+            ESC = b'\x1b'
+            GS = b'\x1d'
+            INIT = ESC + b'@'
+            ALIGN_CENTER = ESC + b'a\x01'
+            ALIGN_LEFT = ESC + b'a\x00'
+            BOLD_ON = ESC + b'E\x01'
+            BOLD_OFF = ESC + b'E\x00'
+            CUT = GS + b'V\x42\x00'
+            
+            lines = []
+            def add_line(text, center=False, bold=False):
+                cmd = b''
+                if center: cmd += ALIGN_CENTER
+                else: cmd += ALIGN_LEFT
+                if bold: cmd += BOLD_ON
+                
+                safe_text = unidecode.unidecode(text)
+                cmd += safe_text.encode('ascii', errors='replace') + b'\n'
+                
+                if bold: cmd += BOLD_OFF
+                lines.append(cmd)
+                
+            lines.append(INIT)
+            add_line(settings.store_name, center=True, bold=True)
+            add_line("ESTADO DE CUENTA - FIADO", center=True, bold=True)
+            add_line("--------------------------------", center=True)
+            add_line(f"Cliente: {client.name}")
+            if client.phone:
+                add_line(f"Tel: {client.phone}")
+            add_line(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+            add_line("--------------------------------", center=True)
+            
+            for cs in credit_sales:
+                add_line(f"{cs.created_at.strftime('%d/%m')} Fac:{cs.sale.receipt_number}")
+                for item in cs.sale.items:
+                    name = item.product.name if item.product else 'Producto'
+                    val2 = item.subtotal
+                    subt_f = f"${val2:,.0f}".replace(',', '.')
+                    add_line(f"  {name}")
+                    add_line(f"    {subt_f}")
+                add_line(f"  Total Compra: {f'${cs.amount:,.0f}'.replace(',', '.')}")
+                if cs.balance > 0 and cs.balance != cs.amount:
+                    add_line(f"  Pendiente:    {f'${cs.balance:,.0f}'.replace(',', '.')}")
+                add_line(" ")
+                
+            if payments:
+                add_line("PAGOS REGISTRADOS", center=True, bold=True)
+                for p in payments:
+                    add_line(f"{p.payment_date.strftime('%d/%m')} {p.payment_method.capitalize()}")
+                    add_line(f"  Monto:       -{f'${p.amount:,.0f}'.replace(',', '.')}")
+                add_line(" ")
+            
+            add_line("--------------------------------", center=True)
+            add_line(f"Total Comprado:  {f'${client.total_purchased:,.0f}'.replace(',', '.')}")
+            add_line(f"Total Pagado:    {f'${client.total_paid:,.0f}'.replace(',', '.')}")
+            add_line("--------------------------------", center=True)
+            add_line(f"SALDO PENDIENTE: {f'${client.total_debt:,.0f}'.replace(',', '.')}", bold=True)
+            add_line("--------------------------------", center=True)
+            
+            add_line("Documento informativo.", center=True)
+            add_line(" ", center=True)
+            add_line(" ", center=True)
+            add_line(" ", center=True)
+            lines.append(CUT)
+            
+            raw_data = b''.join(lines)
+            
+            win32print.StartDocPrinter(hPrinter, 1, ("ImpresionEstadoCuenta", None, "RAW"))
+            try:
+                win32print.StartPagePrinter(hPrinter)
+                win32print.WritePrinter(hPrinter, raw_data)
+                win32print.EndPagePrinter(hPrinter)
+            finally:
+                win32print.EndDocPrinter(hPrinter)
+            return jsonify({'success': True})
+        finally:
+            win32print.ClosePrinter(hPrinter)
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/hardware/weight', methods=['GET'])
+@login_required
+def api_hardware_weight():
+    if not HW_AVAILABLE:
+        return jsonify({'success': False, 'message': 'Hardware nativo no disponible. Usa Web Serial API.'}), 501
+    port = request.args.get('port')
+    if not port:
+        return jsonify({'success': False, 'message': 'Puerto no especificado.'}), 400
+    
+    weight = read_weight_from_port(port)
+    if weight is not None:
+        return jsonify({'success': True, 'weight_grams': weight})
+    else:
+        return jsonify({'success': False, 'message': 'No se pudo leer peso del puerto.'}), 500
+
+
+@app.route('/api/hardware/detect-scale', methods=['GET'])
+@login_required
+def api_hardware_detect_scale():
+    """Attempt to auto-detect which port has the scale connected."""
+    if not HW_AVAILABLE:
+        return jsonify({'success': False, 'message': 'Hardware nativo no disponible. Usa Web Serial API.'}), 501
+    available_ports = serial.tools.list_ports.comports()
+    
+    if not available_ports:
+        return jsonify({'success': False, 'message': 'No se detectaron puertos COM. Verifica que el cable serial esté conectado.'})
+    
+    ordered_ports = sorted(available_ports, 
+                           key=lambda p: any(x in p.description.lower() for x in ['usb', 'serial', 'ch34', 'prolific', 'cp21', 'ftdi', 'com']), 
+                           reverse=True)
+    
+    debug_log = []
+    for p in ordered_ports:
+        msg = f"Probando {p.device} ({p.description})"
+        print(f"DEBUG BASCULA: {msg}")
+        debug_log.append(msg)
+        weight = read_weight_from_port(p.device, timeout=1.5)
+        if weight is not None:
+            return jsonify({
+                'success': True, 
+                'port': p.device, 
+                'description': p.description,
+                'weight_test': weight,
+                'debug': debug_log
+            })
+    
+    try:
+        with open(os.path.join(LOGS_DIR, 'scale_debug.log'), 'a', encoding='utf-8') as f:
+            f.write(f"\n[{datetime.now()}] Auto-detect failed.\n")
+            f.write(f"  Ports tried: {[p.device + ' (' + p.description + ')' for p in ordered_ports]}\n")
+    except: pass
+            
+    return jsonify({
+        'success': False, 
+        'message': f'No se detectó báscula en {len(ordered_ports)} puerto(s): {", ".join(p.device for p in ordered_ports)}. Verifica la conexión y que la báscula esté encendida.',
+        'ports_found': [{'device': p.device, 'description': p.description} for p in ordered_ports]
+    })
+
+
+def read_weight_from_port(port, timeout=2):
+    """Helper to read weight from a specific COM port.
+    Supports SAT CS30 format: +00123.45 kg\\r\\n or similar ASCII weight strings."""
+    ser = None
+    import time as _time
+    
+    try:
+        for baud in [9600, 4800, 2400]:
+            try:
+                ser = serial.Serial(port, baudrate=baud, timeout=timeout,
+                                    bytesize=serial.EIGHTBITS,
+                                    parity=serial.PARITY_NONE,
+                                    stopbits=serial.STOPBITS_ONE)
+                
+                ser.reset_input_buffer()
+                
+                try:
+                    ser.write(b'\x05')
+                    _time.sleep(0.1)
+                    ser.write(b'P\r\n')
+                    _time.sleep(0.1)
+                except: pass
+                
+                _time.sleep(0.5)
+                
+                raw_lines = []
+                max_attempts = 20
+                for attempt in range(max_attempts):
+                    waiting = ser.in_waiting
+                    if waiting > 0:
+                        chunk = ser.read(waiting)
+                        decoded = chunk.decode('ascii', errors='ignore')
+                        lns = [l.strip() for l in decoded.split('\n') if l.strip()]
+                        raw_lines.extend(lns)
+                        if len(raw_lines) >= 3:
+                            break
+                    elif attempt > 5 and raw_lines:
+                        break
+                    _time.sleep(0.15)
+                
+                ser.close()
+                
+                if not raw_lines:
+                    continue
+                
+                try:
+                    with open(os.path.join(LOGS_DIR, 'scale_debug.log'), 'a', encoding='utf-8') as f:
+                        f.write(f"[{datetime.now()}] Port:{port} Baud:{baud} Raw:{raw_lines}\n")
+                except: pass
+                    
+                for l in reversed(raw_lines):
+                    match = re.search(r'[+-]?\s*(\d+\.?\d*)\s*(kg|g|lb)?', l, re.IGNORECASE)
+                    if match:
+                        val_str = match.group(1)
+                        unit = (match.group(2) or '').lower()
+                        val = float(val_str)
+                        
+                        if val == 0 and len(raw_lines) > 1:
+                            continue
+                        
+                        if unit == 'g':
+                            grams = int(val)
+                        elif unit == 'lb':
+                            grams = int(val * 453.592)
+                        elif unit == 'kg' or val < 100:
+                            grams = int(val * 1000)
+                        else:
+                            grams = int(val)
+                        
+                        return grams
+                        
+            except serial.SerialException as e:
+                if ser and ser.is_open: ser.close()
+                if 'access' in str(e).lower() or 'denied' in str(e).lower():
+                    try:
+                        with open(os.path.join(LOGS_DIR, 'scale_debug.log'), 'a', encoding='utf-8') as f:
+                            f.write(f"[{datetime.now()}] ACCESO DENEGADO en {port}: {e}\n")
+                    except: pass
+                continue
+            except Exception as e:
+                if ser and ser.is_open: ser.close()
+                continue
+    except Exception as e:
+        try:
+            with open(os.path.join(LOGS_DIR, 'scale_debug.log'), 'a', encoding='utf-8') as f:
+                f.write(f"[{datetime.now()}] ERROR GENERAL: {e}\n")
+        except: pass
+    finally:
+        if ser and ser.is_open: ser.close()
+    return None
+
+
+@app.route('/api/hardware/web-serial-config', methods=['GET'])
+@login_required
+def api_web_serial_config():
+    """Return configuration for Web Serial API (browser-based hardware)."""
+    return jsonify({
+        'success': True,
+        'scale': {
+            'baud_rates': [9600, 4800, 2400],
+            'data_bits': 8,
+            'stop_bits': 1,
+            'parity': 'none',
+            'weight_pattern': r'([0-9]+\.[0-9]+|[0-9]+)',
+            'unit_hint': 'kg'
+        },
+        'drawer': {
+            'command': [27, 112, 0, 25, 250],
+            'description': 'ESC/POS cash drawer kick command'
+        },
+        'printer': {
+            'init': [27, 64],
+            'align_center': [27, 97, 1],
+            'align_left': [27, 97, 0],
+            'bold_on': [27, 69, 1],
+            'bold_off': [27, 69, 0],
+            'cut': [29, 86, 66, 0]
+        },
+        'hw_native_available': HW_AVAILABLE
+    })
 
 
 # ============================================================
