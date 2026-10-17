@@ -1694,7 +1694,7 @@ def api_subcategories(category_id):
 
 
 # ============================================================
-# ROUTES — AUDIT LOG
+# ROUTES — AUDIT LOG (Integrado al Centro de Control / Configuración)
 # ============================================================
 
 @app.route('/audit')
