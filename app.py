@@ -66,6 +66,10 @@ def cop_filter(value):
     except (ValueError, TypeError):
         return "$0"
 
+@app.template_filter('format_weight')
+def format_weight_filter(grams, unit='kg'):
+    return format_weight(grams, unit)
+
 def format_cop(value):
     if value is None:
         return '$0'

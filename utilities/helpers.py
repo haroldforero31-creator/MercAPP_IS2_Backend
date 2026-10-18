@@ -7,6 +7,15 @@ def round_to_50(value):
 
 def format_weight(grams, unit='kg'):
     """Format grams to display string: 1400, 'kg' -> '1.400 kg' / 1400, 'lb' -> '2.800 lb'"""
+    if not unit:
+        unit = 'kg'
+    if grams is None:
+        return '0 lb' if unit == 'lb' else '0 kg'
+    try:
+        grams = float(grams)
+    except (ValueError, TypeError):
+        return str(grams)
+        
     if unit == 'lb':
         libras = grams / 500.0
         return f"{libras:,.3f} lb".replace(',', '.')
