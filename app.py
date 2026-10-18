@@ -70,6 +70,9 @@ def cop_filter(value):
 def format_weight_filter(grams, unit='kg'):
     return format_weight(grams, unit)
 
+app.jinja_env.filters['format_weight'] = format_weight_filter
+app.jinja_env.filters['cop'] = cop_filter
+
 def format_cop(value):
     if value is None:
         return '$0'
@@ -550,7 +553,9 @@ def inject_globals():
         active_cashier_id=session.get('active_cashier_id', None),
         pending_orders_count=pending_orders,
         global_settings=global_settings,
-        theme_vars=theme_vars
+        theme_vars=theme_vars,
+        format_weight=format_weight_filter,
+        format_cop=cop_filter
     )
 
 def log_audit(action, description, user_id=None, severity='INFO'):
