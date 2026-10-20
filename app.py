@@ -8,7 +8,16 @@ from functools import wraps
 from PIL import Image
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-import os, re, io, csv, secrets, difflib
+import os, re, io, csv, secrets, difflib, random
+
+try:
+    import serial
+    import serial.tools.list_ports
+    import win32print
+    import unidecode
+    HW_AVAILABLE = True
+except ImportError:
+    HW_AVAILABLE = False
 
 # Configuramos las rutas para que Flask busque el HTML en la carpeta FRONTEND
 base_dir = os.path.abspath(os.path.dirname(__file__))
@@ -1677,6 +1686,185 @@ def products():
                            search=search, category_filter=category_filter)
 
 
+def generate_unique_store_barcode(store_id):
+    """
+    Genera un código de barras interno compatible EAN-13 (prefijo 20 + 10 dígitos + dígito de control).
+    El prefijo 20 está reservado por el estándar GS1 para uso restringido interno en supermercados/tiendas.
+    """
+    for _ in range(100):
+        mid = f"{random.randint(1000000000, 9999999999)}"
+        base12 = f"20{mid}"
+        digits = [int(c) for c in base12]
+        s1 = sum(digits[0::2])
+        s2 = sum(digits[1::2]) * 3
+        check_digit = (10 - ((s1 + s2) % 10)) % 10
+        candidate = f"{base12}{check_digit}"
+        
+        if not Product.query.filter_by(store_id=store_id, barcode=candidate).first():
+            return candidate
+            
+    ts = int(datetime.now().timestamp() * 1000)
+    return f"20{str(ts)[-10:]}"
+
+
+def print_barcode_job(printer_name, barcode, product_name, price, store_name, copies=1):
+    """Envía comandos ESC/POS para imprimir etiquetas de código de barras a la impresora térmica."""
+    if not HW_AVAILABLE or not printer_name:
+        return False, "Hardware nativo no disponible o impresora no especificada"
+    try:
+        ESC = b'\x1b'
+        GS = b'\x1d'
+        INIT = ESC + b'@'
+        ALIGN_CENTER = ESC + b'a\x01'
+        ALIGN_LEFT = ESC + b'a\x00'
+        BOLD_ON = ESC + b'E\x01'
+        BOLD_OFF = ESC + b'E\x00'
+        CUT = GS + b'V\x42\x00'
+        
+        label_cmds = []
+        label_cmds.append(INIT)
+        label_cmds.append(ALIGN_CENTER)
+        
+        # Nombre de la tienda
+        clean_store = unidecode.unidecode(store_name[:26]) if store_name else 'MERCAPP'
+        label_cmds.append(BOLD_ON + clean_store.encode('ascii', errors='replace') + b'\n' + BOLD_OFF)
+        
+        # Nombre del producto
+        clean_prod = unidecode.unidecode(product_name[:30])
+        label_cmds.append(BOLD_ON + clean_prod.encode('ascii', errors='replace') + b'\n' + BOLD_OFF)
+        
+        # Precio
+        if price:
+            try:
+                p_val = int(price)
+                price_str = f"${p_val:,.0f} COP".replace(',', '.')
+                label_cmds.append(BOLD_ON + price_str.encode('ascii') + b'\n' + BOLD_OFF)
+            except Exception:
+                pass
+                
+        # Configuración de código de barras en ESC/POS
+        label_cmds.append(GS + b'h' + bytes([70]))  # Altura: 70 dots
+        label_cmds.append(GS + b'w' + bytes([2]))   # Ancho de barra: 2
+        label_cmds.append(GS + b'H' + bytes([2]))   # HRI abajo del código: 2
+        label_cmds.append(GS + b'f' + bytes([0]))   # Fuente HRI estándar 0
+        
+        # Code 128 (GS k 73 len b'{B' + barcode)
+        clean_code = unidecode.unidecode(str(barcode).strip())
+        code_bytes = b'{B' + clean_code.encode('ascii', errors='replace')
+        label_cmds.append(GS + b'k' + bytes([73, len(code_bytes)]) + code_bytes)
+        
+        # Avance y corte
+        label_cmds.append(b'\n\n\n')
+        label_cmds.append(CUT)
+        
+        single_label = b''.join(label_cmds)
+        full_payload = single_label * max(1, min(int(copies or 1), 20))
+        
+        import threading
+        def _send():
+            try:
+                hPrinter = win32print.OpenPrinter(printer_name)
+                try:
+                    win32print.StartDocPrinter(hPrinter, 1, ("EtiquetaCodigo", None, "RAW"))
+                    try:
+                        win32print.StartPagePrinter(hPrinter)
+                        win32print.WritePrinter(hPrinter, full_payload)
+                        win32print.EndPagePrinter(hPrinter)
+                    finally:
+                        win32print.EndDocPrinter(hPrinter)
+                finally:
+                    win32print.ClosePrinter(hPrinter)
+            except Exception as ex:
+                app.logger.error(f"Error imprimiendo etiqueta de código de barras: {ex}")
+                
+        threading.Thread(target=_send, daemon=True).start()
+        return True, "Enviado a imprimir"
+    except Exception as e:
+        return False, str(e)
+
+
+@app.route('/api/products/generate-barcode', methods=['GET'])
+@login_required
+def api_products_generate_barcode():
+    code = generate_unique_store_barcode(current_user.store_id)
+    return jsonify({'success': True, 'barcode': code})
+
+
+@app.route('/api/products/check-barcode', methods=['GET'])
+@login_required
+def api_products_check_barcode():
+    barcode = request.args.get('barcode', '').strip()
+    product_id = request.args.get('product_id', type=int)
+    
+    if not barcode:
+        return jsonify({'success': False, 'message': 'Código vacío'}), 400
+        
+    query = Product.query.filter_by(store_id=current_user.store_id, barcode=barcode)
+    if product_id:
+        query = query.filter(Product.id != product_id)
+        
+    existing = query.first()
+    if existing:
+        return jsonify({
+            'success': True,
+            'available': False,
+            'existing_product': {
+                'id': existing.id,
+                'name': existing.name,
+                'price': existing.price,
+                'barcode': existing.barcode
+            }
+        })
+    return jsonify({'success': True, 'available': True})
+
+
+@app.route('/products/barcode-label')
+@login_required
+def product_barcode_label():
+    barcode = request.args.get('barcode', '').strip()
+    name = request.args.get('name', 'Producto').strip()
+    price = request.args.get('price', '0').strip()
+    copies = request.args.get('copies', 1, type=int)
+    copies = max(1, min(copies, 50))
+    settings = get_store_settings()
+    return render_template('etiqueta_codigo.html',
+                           barcode=barcode,
+                           name=name,
+                           price=price,
+                           copies=copies,
+                           settings=settings)
+
+
+@app.route('/api/hardware/print-barcode', methods=['POST'])
+@login_required
+def api_hardware_print_barcode():
+    data = request.get_json() or {}
+    barcode = data.get('barcode', '').strip()
+    product_name = data.get('product_name', 'Producto').strip()
+    price = data.get('price', 0)
+    copies = int(data.get('copies', 1))
+    printer_name = data.get('printer_name')
+    
+    if not barcode:
+        return jsonify({'success': False, 'message': 'Código de barras no especificado'}), 400
+        
+    settings = get_store_settings()
+    store_name = settings.store_name if settings and settings.store_name else 'MERCAPP'
+    
+    if not HW_AVAILABLE or not printer_name:
+        return jsonify({
+            'success': False,
+            'browser_fallback': True,
+            'message': 'Impresora nativa no disponible. Usa la opción de navegador.'
+        })
+        
+    success, msg = print_barcode_job(printer_name, barcode, product_name, price, store_name, copies)
+    if success:
+        return jsonify({'success': True, 'message': 'Etiqueta enviada a la impresora.'})
+    else:
+        return jsonify({'success': False, 'message': msg}), 500
+
+
 @app.route('/products/add', methods=['GET', 'POST'])
 @login_required
 def product_add():
@@ -1756,7 +1944,20 @@ def product_add():
             db.session.add(product)
             db.session.commit()
             log_audit('PRODUCT_CREATE', f'Producto creado: "{name}" (ID:{product.id}) - Precio: ${price_int:,} COP', current_user.id)
-            flash(f'Producto "{name}" agregado exitosamente.', 'success')
+            
+            auto_print = request.form.get('auto_print_barcode') == '1'
+            printer_name = request.form.get('printer_name', '').strip()
+            if auto_print and barcode:
+                settings = get_store_settings()
+                st_name = settings.store_name if settings and settings.store_name else 'MERCAPP'
+                printed, msg = print_barcode_job(printer_name, barcode, name, price_int, st_name, copies=1)
+                if printed:
+                    flash(f'Producto "{name}" agregado exitosamente y etiqueta con código {barcode} enviada a imprimir en "{printer_name}".', 'success')
+                else:
+                    session['print_barcode_popup'] = {'barcode': barcode, 'name': name, 'price': price_int}
+                    flash(f'Producto "{name}" agregado exitosamente con código de barras {barcode}.', 'success')
+            else:
+                flash(f'Producto "{name}" agregado exitosamente.', 'success')
             return redirect(url_for('products'))
         except Exception as e:
             db.session.rollback()
@@ -1854,7 +2055,20 @@ def product_edit(product_id):
             change_str = ', '.join(changes) if changes else 'datos actualizados'
             
             log_audit('PRODUCT_UPDATE', f'Producto editado (ID:{product.id}): {change_str}', current_user.id)
-            flash(f'Producto "{product.name}" actualizado.', 'success')
+            
+            auto_print = request.form.get('auto_print_barcode') == '1'
+            printer_name = request.form.get('printer_name', '').strip()
+            if auto_print and barcode:
+                settings = get_store_settings()
+                st_name = settings.store_name if settings and settings.store_name else 'MERCAPP'
+                printed, msg = print_barcode_job(printer_name, barcode, name, price_int, st_name, copies=1)
+                if printed:
+                    flash(f'Producto "{product.name}" actualizado y etiqueta enviada a imprimir en "{printer_name}".', 'success')
+                else:
+                    session['print_barcode_popup'] = {'barcode': barcode, 'name': name, 'price': price_int}
+                    flash(f'Producto "{product.name}" actualizado con código de barras {barcode}.', 'success')
+            else:
+                flash(f'Producto "{product.name}" actualizado.', 'success')
             return redirect(url_for('products'))
         except Exception as e:
             db.session.rollback()
@@ -2563,34 +2777,35 @@ def api_smart_search():
             'weight_unit': p.weight_unit
         }
     
+    # Prioridad: Coincidencia exacta de código de barras (numérico o alfanumérico)
+    exact_product = Product.query.filter_by(
+        store_id=current_user.store_id, barcode=query, is_active=True
+    ).first()
+    if exact_product:
+        return jsonify({
+            'success': True,
+            'mode': 'barcode',
+            'product': serialize_product(exact_product),
+            'products': [serialize_product(exact_product)]
+        })
+
     if is_barcode:
-        product = Product.query.filter_by(
-            store_id=current_user.store_id, barcode=query, is_active=True
-        ).first()
-        if product:
+        partial = Product.query.filter(
+            Product.store_id == current_user.store_id,
+            Product.barcode.ilike(f'%{query}%'),
+            Product.is_active == True
+        ).limit(10).all()
+        if partial:
             return jsonify({
                 'success': True,
-                'mode': 'barcode',
-                'product': serialize_product(product),
-                'products': [serialize_product(product)]
+                'mode': 'barcode_partial',
+                'products': [serialize_product(p) for p in partial]
             })
-        else:
-            partial = Product.query.filter(
-                Product.store_id == current_user.store_id,
-                Product.barcode.ilike(f'%{query}%'),
-                Product.is_active == True
-            ).limit(10).all()
-            if partial:
-                return jsonify({
-                    'success': True,
-                    'mode': 'barcode_partial',
-                    'products': [serialize_product(p) for p in partial]
-                })
-            return jsonify({
-                'success': False,
-                'mode': 'barcode',
-                'message': f'No se encontró producto con código de barras "{query}".'
-            }), 404
+        return jsonify({
+            'success': False,
+            'mode': 'barcode',
+            'message': f'No se encontró producto con código de barras "{query}".'
+        }), 404
     else:
         query_lower = query.lower()
         query_words = query_lower.split()
