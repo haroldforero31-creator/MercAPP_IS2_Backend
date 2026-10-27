@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, send_from_directory, jsonify, make_response, session, Response, abort
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import func, desc
+from sqlalchemy import func, desc, text, event
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import joinedload
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask_mail import Mail, Message
@@ -9,7 +10,7 @@ from functools import wraps
 from PIL import Image
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-import os, sys, re, io, csv, secrets, difflib, random
+import os, sys, re, io, csv, secrets, difflib, random, time
 
 try:
     import serial
@@ -61,7 +62,28 @@ app = Flask(__name__,
             static_folder=os.path.join(frontend_dir, 'static'))
 
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'sprint4-nueva-clave-2026')
-app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(base_dir, 'mercapp.db')}"
+
+db_url = os.getenv('DATABASE_URL')
+if db_url:
+    if db_url.startswith('postgres://'):
+        db_url = db_url.replace('postgres://', 'postgresql://', 1)
+    app.config['SQLALCHEMY_DATABASE_URI'] = db_url
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+        'pool_size': int(os.getenv('DB_POOL_SIZE', 50)),
+        'max_overflow': int(os.getenv('DB_MAX_OVERFLOW', 100)),
+        'pool_timeout': 30,
+        'pool_recycle': 1800,
+        'pool_pre_ping': True
+    }
+else:
+    app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(base_dir, 'mercapp.db')}"
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+        'connect_args': {
+            'timeout': 30,
+            'check_same_thread': False
+        }
+    }
+
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # Flask-Mail Configuration
@@ -81,6 +103,22 @@ from models import (
     Order, OrderItem, OrderNotification, AppLicense
 )
 db.init_app(app)
+
+@event.listens_for(Engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    """Enable WAL mode and performance PRAGMAs for high-concurrency SQLite."""
+    if type(dbapi_connection).__module__ == 'sqlite3':
+        try:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode = WAL")
+            cursor.execute("PRAGMA busy_timeout = 30000")
+            cursor.execute("PRAGMA synchronous = NORMAL")
+            cursor.execute("PRAGMA cache_size = -64000")
+            cursor.execute("PRAGMA temp_store = MEMORY")
+            cursor.close()
+        except Exception:
+            pass
+
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 login_manager.login_message = 'Por favor inicia sesión para acceder.'
@@ -214,21 +252,31 @@ def get_today_session():
         CashSession.opened_at < today_end
     ).first()
 
-def generate_receipt_number():
-    """Generate unique receipt number: MRC-YYYYMMDD-NNNN"""
+def generate_receipt_number(store_id=None):
+    """Generate unique receipt number: MRC-YYYYMMDD-NNNN with high-concurrency collision protection."""
     today = datetime.now().strftime('%Y%m%d')
     prefix = f"MRC-{today}-"
-    last_sale = Sale.query.filter(
-        Sale.store_id == current_user.store_id,
-        Sale.receipt_number.like(f"{prefix}%")
-    ).order_by(Sale.id.desc()).first()
+    sid = store_id or getattr(current_user, 'store_id', None)
+    
+    query = Sale.query.filter(Sale.receipt_number.like(f"{prefix}%"))
+    if sid:
+        query = query.filter(Sale.store_id == sid)
+    
+    last_sale = query.order_by(Sale.id.desc()).first()
+    seq = 1
     if last_sale:
         try:
-            last_num = int(last_sale.receipt_number.split('-')[-1])
-            return f"{prefix}{last_num + 1:04d}"
+            parts = last_sale.receipt_number.split('-')
+            num_str = parts[2].split('_')[0]
+            seq = int(num_str) + 1
         except (ValueError, IndexError):
-            pass
-    return f"{prefix}0001"
+            seq = 1
+
+    candidate = f"{prefix}{seq:04d}"
+    if Sale.query.filter_by(receipt_number=candidate).first():
+        suffix = secrets.token_hex(2).upper()
+        candidate = f"{prefix}{seq:04d}_{suffix}"
+    return candidate
 
 def send_verification_email(email, code):
     """Send a verification code to the specified email address via Gmail SMTP."""
@@ -1003,7 +1051,7 @@ def reset_password(token):
 @app.before_request
 def check_license():
     # Allow static files, license endpoints, sync and error handlers
-    if request.endpoint in ['static', 'license', 'api_renovar_licencia', 'api_sync_status', 'internal_error', 'handle_exception']:
+    if request.endpoint in ['static', 'license', 'api_renovar_licencia', 'api_sync_status', 'api_health', 'internal_error', 'handle_exception']:
         return
     
     try:
@@ -3437,9 +3485,23 @@ def api_process_sale():
             db.session.add(sale_item)
             if not si.get('is_custom'):
                 prod = si['product']
-                prod.sale_count = (prod.sale_count or 0) + si['quantity']
                 if not prod.sell_by_weight and prod.stock is not None:
-                    prod.stock -= si['quantity']
+                    # Descuento atómico de stock (evita race conditions y sobreventa entre múltiples usuarios simultáneos)
+                    res = db.session.execute(
+                        text("UPDATE producto SET stock = stock - :qty, sale_count = COALESCE(sale_count, 0) + :qty WHERE id = :pid AND stock >= :qty"),
+                        {'qty': si['quantity'], 'pid': prod.id}
+                    )
+                    if res.rowcount == 0:
+                        db.session.rollback()
+                        return jsonify({
+                            'success': False,
+                            'message': f'Stock insuficiente para "{prod.name}". Se agotó durante la transacción simultánea.'
+                        }), 400
+                else:
+                    db.session.execute(
+                        text("UPDATE producto SET sale_count = COALESCE(sale_count, 0) + :qty WHERE id = :pid"),
+                        {'qty': si['quantity'], 'pid': prod.id}
+                    )
                     
         # Link order if provided
         order_id = pay_data.get('order_id') or (request.get_json() or {}).get('order_id')
@@ -3449,7 +3511,30 @@ def api_process_sale():
                 order.sale_id = sale.id
                 order.status = 'completado'
 
-        db.session.commit()
+        # Commit seguro tolerante a alta concurrencia con reintento ante colisión de recibo
+        for attempt in range(5):
+            try:
+                db.session.commit()
+                break
+            except Exception as commit_err:
+                db.session.rollback()
+                err_str = str(commit_err).lower()
+                if attempt < 4 and ("unique" in err_str or "receipt_number" in err_str or "locked" in err_str or "busy" in err_str):
+                    time.sleep(0.015 * (attempt + 1))
+                    sale.receipt_number = generate_receipt_number(store_id=sale.store_id)
+                    db.session.add(sale)
+                    for si in sale_items:
+                        db.session.add(SaleItem(
+                            sale_id=sale.id,
+                            product_id=si['product'].id,
+                            quantity=si['quantity'],
+                            unit_price=si['unit_price'],
+                            subtotal=si['subtotal'],
+                            weight_grams=si.get('weight_grams'),
+                            weight_unit=si.get('weight_unit')
+                        ))
+                else:
+                    raise commit_err
         log_audit('SALE_COMPLETED', f'Venta {sale.receipt_number} realizada por {format_cop(sale.total)} ({sale.payment_method})', current_user.id)
         
         return jsonify({
@@ -4817,6 +4902,26 @@ def api_sync_status():
         'timestamp': datetime.now().isoformat(),
         'synchronized': True
     })
+
+
+@app.route('/api/health', methods=['GET'])
+def api_health():
+    """Enterprise health check endpoint for monitoring and load testing."""
+    start_t = time.time()
+    db_ok = True
+    try:
+        db.session.execute(text("SELECT 1")).scalar()
+    except Exception:
+        db_ok = False
+    duration_ms = round((time.time() - start_t) * 1000, 2)
+    return jsonify({
+        'status': 'healthy' if db_ok else 'degraded',
+        'database': 'connected' if db_ok else 'error',
+        'db_latency_ms': duration_ms,
+        'timestamp': datetime.now().isoformat(),
+        'version': 'IS2-Enterprise',
+        'sqlite_wal': True
+    }), (200 if db_ok else 500)
 
 
 # ============================================================

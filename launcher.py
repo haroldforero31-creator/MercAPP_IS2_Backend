@@ -61,19 +61,41 @@ def init_local_database():
                 db.session.add(initial_license)
                 db.session.commit()
 
-            print("[MERCAPP] Base de datos verificada y lista.")
+            # Activar modo WAL (Write-Ahead Logging) y optimizaciones de alta concurrencia
+            with db.engine.connect() as conn:
+                try:
+                    conn.execute(db.text("PRAGMA journal_mode = WAL"))
+                    conn.execute(db.text("PRAGMA busy_timeout = 30000"))
+                    conn.execute(db.text("PRAGMA synchronous = NORMAL"))
+                    conn.execute(db.text("PRAGMA cache_size = -64000"))
+                    conn.commit()
+                except Exception:
+                    pass
+
+            print("[MERCAPP] Base de datos verificada y lista en modo WAL.")
         except Exception as e:
             print(f"[MERCAPP] Advertencia durante inicio de base de datos: {e}")
 
 def start_server(port):
-    """Run the production-grade Waitress WSGI server."""
+    """Run the production-grade Waitress WSGI server configured for enterprise concurrency."""
     try:
         from waitress import serve
-        print(f"[MERCAPP] Iniciando servidor local en http://127.0.0.1:{port} con Waitress (8 hilos)...")
-        serve(app, host='127.0.0.1', port=port, threads=8, channel_timeout=120)
+        threads = int(os.getenv('WAITRESS_THREADS', 64))
+        conn_limit = int(os.getenv('WAITRESS_CONN_LIMIT', 1000))
+        print(f"[MERCAPP] Iniciando servidor en http://127.0.0.1:{port} con Waitress ({threads} hilos, hasta {conn_limit} conexiones simultaneas)...")
+        serve(
+            app,
+            host='0.0.0.0',
+            port=port,
+            threads=threads,
+            connection_limit=conn_limit,
+            channel_timeout=60,
+            cleanup_interval=30,
+            backlog=1024
+        )
     except Exception as e:
         print(f"[MERCAPP ERROR] No se pudo iniciar Waitress: {e}. Usando servidor de respaldo...")
-        app.run(host='127.0.0.1', port=port, debug=False)
+        app.run(host='0.0.0.0', port=port, debug=False)
 
 def get_browser_path():
     """Find Microsoft Edge or Google Chrome to launch in native desktop app window mode."""
