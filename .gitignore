@@ -6,3 +6,12 @@ __pycache__/
 mercapp.db
 uploads/
 .env
+dist_package/
+dist/
+build/
+*.zip
+*.rar
+logs/
+MercAPP_IS2_Windows/
+*.db-shm
+*.db-wal

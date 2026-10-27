@@ -1,14 +1,53 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, send_from_directory, jsonify, make_response
+from flask import Flask, render_template, request, redirect, url_for, flash, send_from_directory, jsonify, make_response, session, Response, abort
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import func, desc, text, event
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import joinedload
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
+from flask_mail import Mail, Message
 from werkzeug.security import generate_password_hash, check_password_hash
+from functools import wraps
 from PIL import Image
-from datetime import datetime
-import os, re, io, csv
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
+import os, sys, re, io, csv, secrets, difflib, random, time
 
-# Configuramos las rutas para que Flask busque el HTML en la carpeta FRONTEND
-base_dir = os.path.abspath(os.path.dirname(__file__))
-frontend_dir = os.path.abspath(os.path.join(base_dir, '..', 'MercAPP_IS2_Frontend'))
+try:
+    import serial
+    import serial.tools.list_ports
+    import win32print
+    import unidecode
+    HW_AVAILABLE = True
+except ImportError:
+    HW_AVAILABLE = False
+
+# Configuramos las rutas compatibles con Desarrollo, Carpetas Distribuidas y Ejecutables Congelados (PyInstaller)
+if getattr(sys, 'frozen', False):
+    base_dir = os.path.dirname(sys.executable)
+    bundle_dir = getattr(sys, '_MEIPASS', base_dir)
+    cand_frontend = os.path.join(bundle_dir, 'MercAPP_IS2_Frontend')
+    if os.path.exists(cand_frontend):
+        frontend_dir = cand_frontend
+    elif os.path.exists(os.path.join(bundle_dir, 'templates')):
+        frontend_dir = bundle_dir
+    elif os.path.exists(os.path.join(base_dir, 'MercAPP_IS2_Frontend')):
+        frontend_dir = os.path.join(base_dir, 'MercAPP_IS2_Frontend')
+    else:
+        frontend_dir = base_dir
+else:
+    base_dir = os.path.abspath(os.path.dirname(__file__))
+    sibling_frontend = os.path.abspath(os.path.join(base_dir, '..', 'MercAPP_IS2_Frontend'))
+    if os.path.exists(sibling_frontend):
+        frontend_dir = sibling_frontend
+    elif os.path.exists(os.path.join(base_dir, 'MercAPP_IS2_Frontend')):
+        frontend_dir = os.path.abspath(os.path.join(base_dir, 'MercAPP_IS2_Frontend'))
+    else:
+        frontend_dir = base_dir
+
+dotenv_path = os.path.join(base_dir, '.env')
+if os.path.exists(dotenv_path):
+    load_dotenv(dotenv_path)
+
 UPLOAD_DIR = os.path.join(base_dir, 'uploads')
 os.makedirs(os.path.join(UPLOAD_DIR, 'products'), exist_ok=True)
 os.makedirs(os.path.join(UPLOAD_DIR, 'categories'), exist_ok=True)
@@ -22,13 +61,72 @@ app = Flask(__name__,
             template_folder=os.path.join(frontend_dir, 'templates'),
             static_folder=os.path.join(frontend_dir, 'static'))
 
-app.config['SECRET_KEY'] = 'sprint2-nueva-clave-2026'
-app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(base_dir, 'mercapp.db')}"
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'sprint4-nueva-clave-2026')
+
+db_url = os.getenv('DATABASE_URL')
+if db_url:
+    if db_url.startswith('postgres://'):
+        db_url = db_url.replace('postgres://', 'postgresql://', 1)
+    app.config['SQLALCHEMY_DATABASE_URI'] = db_url
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+        'pool_size': int(os.getenv('DB_POOL_SIZE', 50)),
+        'max_overflow': int(os.getenv('DB_MAX_OVERFLOW', 100)),
+        'pool_timeout': 30,
+        'pool_recycle': 1800,
+        'pool_pre_ping': True
+    }
+else:
+    app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(base_dir, 'mercapp.db')}"
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+        'connect_args': {
+            'timeout': 30,
+            'check_same_thread': False
+        }
+    }
+
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-db = SQLAlchemy(app)
+# Flask-Mail Configuration
+app.config['MAIL_SERVER'] = os.getenv('MAIL_SERVER', 'smtp.gmail.com')
+app.config['MAIL_PORT'] = int(os.getenv('MAIL_PORT', 587))
+app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME', 'mercapp.services@gmail.com')
+app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD', 'mykrejpwsnpdpbom')
+app.config['MAIL_DEFAULT_SENDER'] = ('MercAPP', os.getenv('MAIL_USERNAME', 'mercapp.services@gmail.com'))
+
+mail = Mail(app)
+
+from models import (
+    db, Store, StoreSettings, User, Customer, CustomerEmailVerification, AuditLog,
+    EmailVerification, PasswordReset, Category, Subcategory, Product,
+    CashSession, Sale, SaleItem, CreditClient, CreditSale, CreditPayment,
+    Order, OrderItem, OrderNotification, AppLicense
+)
+db.init_app(app)
+
+@event.listens_for(Engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    """Enable WAL mode and performance PRAGMAs for high-concurrency SQLite."""
+    if type(dbapi_connection).__module__ == 'sqlite3':
+        try:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode = WAL")
+            cursor.execute("PRAGMA busy_timeout = 30000")
+            cursor.execute("PRAGMA synchronous = NORMAL")
+            cursor.execute("PRAGMA cache_size = -64000")
+            cursor.execute("PRAGMA temp_store = MEMORY")
+            cursor.close()
+        except Exception:
+            pass
+
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
+login_manager.login_message = 'Por favor inicia sesión para acceder.'
+login_manager.login_message_category = 'error'
+
+from utilities.helpers import (
+    round_to_50, format_weight, generate_verification_code, validate_payment
+)
 
 @app.template_filter('cop')
 def cop_filter(value):
@@ -36,6 +134,13 @@ def cop_filter(value):
         return f"${int(value):,}".replace(",", ".")
     except (ValueError, TypeError):
         return "$0"
+
+@app.template_filter('format_weight')
+def format_weight_filter(grams, unit='kg'):
+    return format_weight(grams, unit)
+
+app.jinja_env.filters['format_weight'] = format_weight_filter
+app.jinja_env.filters['cop'] = cop_filter
 
 def format_cop(value):
     if value is None:
@@ -71,145 +176,374 @@ def color_alpha(color, alpha=0.3):
     except Exception:
         return color
 
+def clamp_color_darkness(hex_color, max_brightness=140):
+    """Garantiza que un color hexadecimal no sea demasiado claro para mantener contraste con texto blanco."""
+    if not hex_color or hex_color == 'default' or not hex_color.startswith('#') or len(hex_color) != 7:
+        return hex_color
+    try:
+        r = int(hex_color[1:3], 16)
+        g = int(hex_color[3:5], 16)
+        b = int(hex_color[5:7], 16)
+        brightness = 0.299 * r + 0.587 * g + 0.114 * b
+        if brightness > max_brightness and brightness > 0:
+            factor = max_brightness / brightness
+            r = int(r * factor)
+            g = int(g * factor)
+            b = int(b * factor)
+            return f"#{r:02x}{g:02x}{b:02x}"
+        return hex_color
+    except Exception:
+        return hex_color
+
 # ============================================================
 # MODELS — Sprint 2 + Sprint 3: Tienda, Configuración, Categorías, Subcategorías, Productos, Auditoría
 # ============================================================
 
-class Store(db.Model):
-    __tablename__ = 'tienda'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.now)
-    is_active = db.Column(db.Boolean, default=True)
-    users = db.relationship('User', backref='store', lazy=True)
-    categories = db.relationship('Category', backref='store', lazy=True)
-    products = db.relationship('Product', backref='store', lazy=True)
-    settings = db.relationship('StoreSettings', backref='store', lazy=True)
+# ============================================================
+# CASHIER & SESSION HELPERS
+# ============================================================
 
-class StoreSettings(db.Model):
-    __tablename__ = 'configuracion_tienda'
-    id = db.Column(db.Integer, primary_key=True)
-    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False)
-    store_name = db.Column(db.String(100), default='MercAPP')
-    logo = db.Column(db.String(200), default='logo.png')
-    qr_transferencia = db.Column(db.String(200), default='')
-    razon_social = db.Column(db.String(200), default='MercAPP S.A.S')
-    nit = db.Column(db.String(20), default='000.000.000-0')
-    rut = db.Column(db.String(30), default='')
-    regimen_tributario = db.Column(db.String(100), default='No responsable de IVA')
-    gran_contribuyente = db.Column(db.String(100), default='')
-    agente_retencion = db.Column(db.String(100), default='')
-    direccion = db.Column(db.String(200), default='')
-    telefono = db.Column(db.String(20), default='')
-    ciudad = db.Column(db.String(100), default='')
-    resolucion_dian = db.Column(db.String(100), default='')
-    resolucion_fecha = db.Column(db.String(50), default='')
-    rango_desde = db.Column(db.String(30), default='MRC-0001')
-    rango_hasta = db.Column(db.String(30), default='MRC-9999')
-    mensaje_ticket = db.Column(db.String(200), default='¡Gracias por su compra!')
-    scale_mode = db.Column(db.String(10), default='manual')  # 'manual' or 'auto'
-    printer_name = db.Column(db.String(200), default='')
-    auto_print = db.Column(db.Boolean, default=True)
-    auto_drawer = db.Column(db.Boolean, default=True)
+def is_cashier_mode():
+    """Check if the current session is in cashier mode."""
+    return session.get('cashier_mode', False)
+
+def get_active_cashier():
+    """Get the active cashier User object, or None."""
+    cashier_id = session.get('active_cashier_id')
+    if cashier_id:
+        return db.session.get(User, cashier_id)
+    return None
+
+def get_effective_user_id():
+    """Get the user ID for sales/sessions: cashier if active, else current_user."""
+    if is_cashier_mode():
+        cid = session.get('active_cashier_id')
+        if cid:
+            return cid
+    return current_user.id
+
+def admin_only(f):
+    """Decorator to restrict access to admin users only."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not current_user.is_authenticated or not getattr(current_user, 'is_admin', False):
+            flash('Acceso restringido a administradores.', 'error')
+            return redirect(url_for('pos'))
+        if is_cashier_mode():
+            flash('Desactiva el modo cajero para acceder aquí.', 'error')
+            return redirect(url_for('pos'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+
+def get_today_session():
+    """Get the active cash session for the current calendar day."""
+    if not current_user.is_authenticated or not hasattr(current_user, 'store_id'):
+        return None
+    now = datetime.now()
+    today_start = datetime(now.year, now.month, now.day)
+    today_end = today_start + timedelta(days=1)
+    effective_uid = get_effective_user_id()
+    return CashSession.query.filter(
+        CashSession.store_id == current_user.store_id,
+        CashSession.user_id == effective_uid,
+        CashSession.opened_at >= today_start,
+        CashSession.opened_at < today_end
+    ).first()
+
+def generate_receipt_number(store_id=None):
+    """Generate unique receipt number: MRC-YYYYMMDD-NNNN with high-concurrency collision protection."""
+    today = datetime.now().strftime('%Y%m%d')
+    prefix = f"MRC-{today}-"
+    sid = store_id or getattr(current_user, 'store_id', None)
     
-    # Theme visual personalization
-    theme_color_primary = db.Column(db.String(20), default='default')
-    theme_color_accent = db.Column(db.String(20), default='default')
-    theme_color_background = db.Column(db.String(20), default='default')
-    theme_font_family = db.Column(db.String(50), default='default')
-    theme_font_size = db.Column(db.String(15), default='default')
-    theme_btn_clear_color = db.Column(db.String(20), default='default')
-    theme_btn_charge_color = db.Column(db.String(20), default='default')
-
-class User(UserMixin, db.Model):
-    __tablename__ = 'usuario'
-    id = db.Column(db.Integer, primary_key=True)
-    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False)
-    name = db.Column(db.String(100), nullable=False)
-    email = db.Column(db.String(120), unique=True, nullable=False)
-    password_hash = db.Column(db.String(255), nullable=False)
-    is_admin = db.Column(db.Boolean, default=True)
-    status = db.Column(db.String(20), default='ACTIVO')  # ACTIVO, INACTIVO, BLOQUEADO
-    failed_attempts = db.Column(db.Integer, default=0)
-    last_login = db.Column(db.DateTime, nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.now)
-
-    def set_password(self, password):
-        self.password_hash = generate_password_hash(password)
-        
-    def check_password(self, password):
-        return check_password_hash(self.password_hash, password)
-
-class Customer(UserMixin, db.Model):
-    __tablename__ = 'cliente'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100))
-    email = db.Column(db.String(100), unique=True)
-    phone = db.Column(db.String(20))
-    address = db.Column(db.String(200))
-    password_hash = db.Column(db.String(255))
-    is_admin = False
-
-    def set_password(self, password):
-        self.password_hash = generate_password_hash(password)
-        
-    def check_password(self, password):
-        return check_password_hash(self.password_hash, password)
-
-class Category(db.Model):
-    __tablename__ = 'categoria'
-    id = db.Column(db.Integer, primary_key=True)
-    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False)
-    name = db.Column(db.String(50), nullable=False)
-    slug = db.Column(db.String(50), nullable=False)
-    image = db.Column(db.String(200), default='default_category.png')
-    description = db.Column(db.String(200))
-    display_order = db.Column(db.Integer, default=0)
-    visible_in_pos = db.Column(db.Boolean, default=True)
-    subcategories = db.relationship('Subcategory', backref='category', lazy=True, cascade='all, delete-orphan')
-    products = db.relationship('Product', backref='category', lazy=True)
-
-class Subcategory(db.Model):
-    __tablename__ = 'subcategoria'
-    id = db.Column(db.Integer, primary_key=True)
-    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False)
-    name = db.Column(db.String(50), nullable=False)
-    slug = db.Column(db.String(50), nullable=False)
-    category_id = db.Column(db.Integer, db.ForeignKey('categoria.id'), nullable=False)
-    image = db.Column(db.String(200), default='default_subcategory.png')
-    display_order = db.Column(db.Integer, default=0)
-    products = db.relationship('Product', backref='subcategory', lazy=True)
-
-class Product(db.Model):
-    __tablename__ = 'producto'
-    id = db.Column(db.Integer, primary_key=True)
-    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False)
-    name = db.Column(db.String(150), nullable=False)
-    barcode = db.Column(db.String(60), nullable=True)
-    price = db.Column(db.Integer, nullable=False)
-    category_id = db.Column(db.Integer, db.ForeignKey('categoria.id'), nullable=False)
-    subcategory_id = db.Column(db.Integer, db.ForeignKey('subcategoria.id'), nullable=True)
-    image = db.Column(db.String(200), default='default_product.png')
-    has_barcode = db.Column(db.Boolean, default=False)
-    stock = db.Column(db.Integer, nullable=True)
-    sell_by_weight = db.Column(db.Boolean, default=False)
-    weight_unit = db.Column(db.String(5), default='kg')  # 'kg' or 'lb'
-    plu_code = db.Column(db.String(60), nullable=True)
-    is_active = db.Column(db.Boolean, default=True)
-    created_at = db.Column(db.DateTime, default=datetime.now)
-
-class AuditLog(db.Model):
-    """Tabla de auditoría APPEND-ONLY: registra quién hizo qué y cuándo."""
-    __tablename__ = 'auditoria'
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('usuario.id'), nullable=True)
-    action = db.Column(db.String(50), nullable=False)
-    description = db.Column(db.Text, nullable=False)
-    ip_address = db.Column(db.String(45), default='127.0.0.1')
-    severity = db.Column(db.String(20), default='INFO')
-    created_at = db.Column(db.DateTime, default=datetime.now)
+    query = Sale.query.filter(Sale.receipt_number.like(f"{prefix}%"))
+    if sid:
+        query = query.filter(Sale.store_id == sid)
     
-    user = db.relationship('User', backref='audit_logs', lazy=True)
+    last_sale = query.order_by(Sale.id.desc()).first()
+    seq = 1
+    if last_sale:
+        try:
+            parts = last_sale.receipt_number.split('-')
+            num_str = parts[2].split('_')[0]
+            seq = int(num_str) + 1
+        except (ValueError, IndexError):
+            seq = 1
+
+    candidate = f"{prefix}{seq:04d}"
+    if Sale.query.filter_by(receipt_number=candidate).first():
+        suffix = secrets.token_hex(2).upper()
+        candidate = f"{prefix}{seq:04d}_{suffix}"
+    return candidate
+
+def send_verification_email(email, code):
+    """Send a verification code to the specified email address via Gmail SMTP."""
+    print("\n" + "="*50)
+    print(f"CODIGO DE VERIFICACION PARA {email}: {code}")
+    print("="*50 + "\n")
+    try:
+        if not app.config.get('MAIL_USERNAME'):
+            print("Envío de correo omitido: MAIL_USERNAME no está configurado.")
+            return True
+        msg = Message(
+            subject=f'MercAPP - Tu código de verificación: {code}',
+            recipients=[email]
+        )
+        msg.html = f"""
+        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 30px; background: #1A1F2E; color: #E8EAED; border-radius: 16px;">
+            <div style="text-align: center; margin-bottom: 24px;">
+                <h1 style="font-size: 1.8rem; margin: 8px 0 4px; background: linear-gradient(135deg, #2E7D32, #FFA726); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">MercAPP</h1>
+                <p style="color: #9AA0A6; font-size: 0.9rem;">Sistema de Supermercado</p>
+            </div>
+            <hr style="border: none; border-top: 1px solid #2D3344; margin: 20px 0;">
+            <p style="font-size: 1rem; text-align: center;">Tu código de verificación es:</p>
+            <div style="text-align: center; margin: 24px 0;">
+                <span style="font-size: 2.5rem; font-weight: 900; letter-spacing: 12px; color: #FFA726; background: rgba(255,143,0,0.1); padding: 16px 32px; border-radius: 12px; border: 2px solid rgba(255,143,0,0.3);">{code}</span>
+            </div>
+            <p style="font-size: 0.9rem; color: #9AA0A6; text-align: center;">
+                Este código expira en <strong style="color: #FFA726;">10 minutos</strong>.<br>
+                Si no solicitaste este código, ignora este mensaje.
+            </p>
+            <hr style="border: none; border-top: 1px solid #2D3344; margin: 20px 0;">
+            <p style="font-size: 0.75rem; color: #5F6368; text-align: center;">
+                © MercAPP - Sistema POS para Supermercados
+            </p>
+        </div>
+        """
+        mail.send(msg)
+        return True
+    except Exception as e:
+        print(f"MAIL ERROR: {str(e)}")
+        return True
+
+def send_reset_email(user, token):
+    """Send password reset link to user."""
+    reset_url = url_for('reset_password', token=token, _external=True)
+    print("\n" + "!"*50)
+    print(f"LINK DE RECUPERACION PARA {user.email}: {reset_url}")
+    print("!"*50 + "\n")
+    try:
+        if not app.config.get('MAIL_USERNAME'):
+            return True
+        msg = Message(
+            subject='MercAPP - Recuperación de Contraseña',
+            recipients=[user.email]
+        )
+        msg.html = f"""
+        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 30px; background: #1A1F2E; color: #E8EAED; border-radius: 16px;">
+            <div style="text-align: center; margin-bottom: 24px;">
+                <h1 style="font-size: 1.8rem; margin: 8px 0 4px; color: #FFA726;">MercAPP</h1>
+                <p style="color: #9AA0A6; font-size: 0.9rem;">Recuperación de Contraseña</p>
+            </div>
+            <p style="font-size: 1rem;">Hola <strong>{user.name}</strong>,</p>
+            <p>Has solicitado restablecer tu contraseña. Haz clic en el botón a continuación:</p>
+            <div style="text-align: center; margin: 30px 0;">
+                <a href="{reset_url}" style="background: #FFA726; color: #121212; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">Restablecer Contraseña</a>
+            </div>
+            <p style="font-size: 0.85rem; color: #9AA0A6;">Este enlace expirará en 1 hora. Si no lo solicitaste, puedes ignorar este mensaje.</p>
+        </div>
+        """
+        mail.send(msg)
+        return True
+    except Exception as e:
+        print(f"MAIL ERROR: {e}")
+        return True
+
+
+def send_credit_sale_invoice(client, sale, sale_items):
+    """Envía la factura por correo al cliente fiado con los productos comprados en esta transacción específica."""
+    if not client or not client.email:
+        return False
+    try:
+        if not app.config.get('MAIL_USERNAME'):
+            return True
+            
+        store = db.session.get(Store, sale.store_id)
+        store_name = store.name if store else "MercAPP"
+        
+        rows_html = ""
+        for si in sale_items:
+            prod_name = si['product'].name
+            if si.get('weight_grams'):
+                qty_str = f"{si['weight_grams']}g ({si.get('weight_unit', 'g')})"
+            else:
+                qty_str = f"{si['quantity']} un"
+            unit_price_str = format_cop(si['unit_price'])
+            subtotal_str = format_cop(si['subtotal'])
+            rows_html += f"""
+            <tr style="border-bottom: 1px solid #2D3344;">
+                <td style="padding: 10px; color: #FFFFFF; font-size: 0.9rem;">{prod_name}</td>
+                <td style="padding: 10px; text-align: center; color: #9AA0A6; font-size: 0.85rem;">{qty_str}</td>
+                <td style="padding: 10px; text-align: right; color: #9AA0A6; font-size: 0.85rem;">{unit_price_str}</td>
+                <td style="padding: 10px; text-align: right; color: #FFA726; font-weight: 600; font-size: 0.9rem;">{subtotal_str}</td>
+            </tr>
+            """
+            
+        sale_date_str = sale.sale_date.strftime('%d/%m/%Y %I:%M %p')
+        total_sale_str = format_cop(sale.total)
+        total_debt_str = format_cop(client.total_debt)
+
+        msg = Message(
+            subject=f"Factura de Compra Fiada #{sale.receipt_number} - {store_name}",
+            recipients=[client.email]
+        )
+        msg.html = f"""
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #121622; color: #E8EAED; border-radius: 16px; overflow: hidden; border: 1px solid #2D3344; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
+            <div style="background: linear-gradient(135deg, #1b5e20, #2E7D32); padding: 24px; text-align: center;">
+                <h1 style="margin: 0; font-size: 1.6rem; color: #FFFFFF; letter-spacing: 0.5px;">{store_name}</h1>
+                <p style="margin: 4px 0 0; color: rgba(255,255,255,0.85); font-size: 0.9rem;">Comprobante Oficial de Compra a Crédito (Fiado)</p>
+            </div>
+
+            <div style="padding: 24px;">
+                <div style="background: rgba(255,255,255,0.03); padding: 14px 18px; border-radius: 10px; border: 1px solid #2D3344; margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between;">
+                        <div>
+                            <div style="color: #9AA0A6; font-size: 0.8rem; text-transform: uppercase;">Cliente</div>
+                            <div style="color: #FFFFFF; font-weight: bold; font-size: 1.05rem;">{client.name}</div>
+                        </div>
+                        <div style="text-align: right;">
+                            <div style="color: #9AA0A6; font-size: 0.8rem; text-transform: uppercase;">Factura N°</div>
+                            <div style="color: #FFA726; font-weight: bold; font-size: 1.05rem;">{sale.receipt_number}</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="color: #9AA0A6; font-size: 0.85rem; margin-bottom: 16px;">
+                    <strong>Fecha y Hora:</strong> {sale_date_str}
+                </div>
+
+                <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
+                    <thead>
+                        <tr style="background: rgba(255,255,255,0.05); border-bottom: 2px solid #2E7D32;">
+                            <th style="padding: 10px; text-align: left; color: #A5D6A7; font-size: 0.85rem;">Producto</th>
+                            <th style="padding: 10px; text-align: center; color: #A5D6A7; font-size: 0.85rem;">Cant.</th>
+                            <th style="padding: 10px; text-align: right; color: #A5D6A7; font-size: 0.85rem;">Precio Unit.</th>
+                            <th style="padding: 10px; text-align: right; color: #A5D6A7; font-size: 0.85rem;">Subtotal</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows_html}
+                    </tbody>
+                </table>
+
+                <div style="background: rgba(0,0,0,0.25); border-radius: 10px; padding: 16px; border: 1px solid #2D3344; margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                        <span style="color: #9AA0A6;">Total de esta compra fiada:</span>
+                        <span style="color: #FFFFFF; font-weight: bold; font-size: 1.1rem;">{total_sale_str}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; padding-top: 8px; border-top: 1px solid #2D3344;">
+                        <span style="color: #FFA726; font-weight: 600;">Saldo total acumulado adeudado:</span>
+                        <span style="color: #FFA726; font-weight: bold; font-size: 1.2rem;">{total_debt_str}</span>
+                    </div>
+                </div>
+
+                <div style="background: rgba(255, 167, 38, 0.08); border-left: 4px solid #FFA726; padding: 12px 16px; border-radius: 6px; font-size: 0.85rem; color: #9AA0A6; line-height: 1.4;">
+                    <strong style="color: #FFA726;">Aviso importante:</strong> Esta factura detalla únicamente los artículos adquiridos en esta transacción. Recuerda realizar al menos un abono antes de 60 días para mantener tu cupo de crédito activo.
+                </div>
+            </div>
+
+            <div style="background: #0B0E14; padding: 16px; text-align: center; font-size: 0.75rem; color: #5F6368; border-top: 1px solid #1F2430;">
+                Comprobante emitido automáticamente por {store_name} a través de la plataforma MercAPP.
+            </div>
+        </div>
+        """
+        mail.send(msg)
+        return True
+    except Exception as e:
+        print(f"[MAIL] Error enviando factura de fiado a {client.email}: {e}")
+        return False
+
+
+def send_credit_payment_receipt(client, payment, previous_debt):
+    """Envía un recibo por correo electrónico al cliente cuando realiza un abono a su deuda."""
+    if not client or not client.email:
+        return False
+    try:
+        if not app.config.get('MAIL_USERNAME'):
+            return True
+            
+        store = db.session.get(Store, client.store_id)
+        store_name = store.name if store else "MercAPP"
+        
+        payment_date_str = payment.payment_date.strftime('%d/%m/%Y %I:%M %p')
+        payment_amount_str = format_cop(payment.amount)
+        previous_debt_str = format_cop(previous_debt)
+        new_debt_str = format_cop(client.total_debt)
+        status_text = "DEUDA TOTALMENTE SALDADA" if client.total_debt <= 0 else "SALDO PENDIENTE"
+        status_color = "#2E7D32" if client.total_debt <= 0 else "#FFA726"
+
+        msg = Message(
+            subject=f"Recibo de Abono a Deuda #{payment.id} - {store_name}",
+            recipients=[client.email]
+        )
+        msg.html = f"""
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #121622; color: #E8EAED; border-radius: 16px; overflow: hidden; border: 1px solid #2D3344; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
+            <div style="background: linear-gradient(135deg, #0D47A1, #1976D2); padding: 24px; text-align: center;">
+                <h1 style="margin: 0; font-size: 1.6rem; color: #FFFFFF; letter-spacing: 0.5px;">{store_name}</h1>
+                <p style="margin: 4px 0 0; color: rgba(255,255,255,0.85); font-size: 0.9rem;">Recibo Oficial de Abono a Deuda</p>
+            </div>
+
+            <div style="padding: 24px;">
+                <div style="background: rgba(255,255,255,0.03); padding: 14px 18px; border-radius: 10px; border: 1px solid #2D3344; margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between;">
+                        <div>
+                            <div style="color: #9AA0A6; font-size: 0.8rem; text-transform: uppercase;">Cliente</div>
+                            <div style="color: #FFFFFF; font-weight: bold; font-size: 1.05rem;">{client.name}</div>
+                        </div>
+                        <div style="text-align: right;">
+                            <div style="color: #9AA0A6; font-size: 0.8rem; text-transform: uppercase;">Recibo N°</div>
+                            <div style="color: #64B5F6; font-weight: bold; font-size: 1.05rem;">REC-{payment.id:05d}</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="color: #9AA0A6; font-size: 0.85rem; margin-bottom: 20px;">
+                    <strong>Fecha y Hora:</strong> {payment_date_str}<br>
+                    <strong>Método de pago:</strong> {payment.payment_method.capitalize()}<br>
+                    {f"<strong>Observaciones:</strong> {payment.notes}<br>" if payment.notes else ""}
+                </div>
+
+                <div style="text-align: center; background: rgba(25, 118, 210, 0.1); border: 2px solid rgba(25, 118, 210, 0.3); border-radius: 12px; padding: 20px; margin-bottom: 24px;">
+                    <div style="color: #90CAF9; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px;">Monto Abonado</div>
+                    <div style="font-size: 2.2rem; font-weight: 800; color: #FFFFFF; margin: 4px 0;">{payment_amount_str}</div>
+                </div>
+
+                <div style="background: rgba(0,0,0,0.25); border-radius: 10px; padding: 16px; border: 1px solid #2D3344; margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                        <span style="color: #9AA0A6;">Deuda anterior:</span>
+                        <span style="color: #E8EAED; font-weight: 600;">{previous_debt_str}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                        <span style="color: #4CAF50;">Abono realizado:</span>
+                        <span style="color: #4CAF50; font-weight: 600;">- {payment_amount_str}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; padding-top: 10px; border-top: 1px solid #2D3344;">
+                        <span style="color: #FFFFFF; font-weight: bold;">Nuevo saldo pendiente:</span>
+                        <span style="color: {status_color}; font-weight: 800; font-size: 1.25rem;">{new_debt_str}</span>
+                    </div>
+                    <div style="text-align: right; margin-top: 6px;">
+                        <span style="display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: bold; background: rgba(46, 125, 50, 0.15); color: {status_color};">{status_text}</span>
+                    </div>
+                </div>
+
+                <div style="background: rgba(46, 125, 50, 0.08); border-left: 4px solid #2E7D32; padding: 12px 16px; border-radius: 6px; font-size: 0.85rem; color: #A5D6A7; line-height: 1.4;">
+                    ¡Muchas gracias por tu abono! Mantener tu cuenta al día te permite seguir disfrutando de las facilidades de crédito en {store_name}.
+                </div>
+            </div>
+
+            <div style="background: #0B0E14; padding: 16px; text-align: center; font-size: 0.75rem; color: #5F6368; border-top: 1px solid #1F2430;">
+                Comprobante emitido automáticamente por MercAPP para {store_name}.
+            </div>
+        </div>
+        """
+        mail.send(msg)
+        return True
+    except Exception as e:
+        print(f"[MAIL] Error enviando recibo de abono a {client.email}: {e}")
+        return False
+
 
 
 # ============================================================
@@ -218,6 +552,9 @@ class AuditLog(db.Model):
 
 @login_manager.user_loader
 def load_user(user_id):
+    if str(user_id).startswith('customer_'):
+        cid = int(str(user_id).split('_')[1])
+        return db.session.get(Customer, cid)
     user = db.session.get(User, int(user_id))
     if user:
         return user
@@ -244,20 +581,20 @@ def inject_globals():
     global_settings = get_store_settings() if current_user.is_authenticated else None
     theme_vars = {}
     if global_settings:
-        p = global_settings.theme_color_primary
+        p = clamp_color_darkness(global_settings.theme_color_primary, max_brightness=140)
         if p and p != 'default':
             theme_vars['primary'] = p
             theme_vars['primary_light'] = mix_color(p, 'white', 0.85)
             theme_vars['primary_dark'] = mix_color(p, 'black', 0.85)
             theme_vars['primary_glow'] = color_alpha(p, 0.3)
             
-        a = global_settings.theme_color_accent
+        a = clamp_color_darkness(global_settings.theme_color_accent, max_brightness=165)
         if a and a != 'default':
             theme_vars['accent'] = a
             theme_vars['accent_light'] = mix_color(a, 'white', 0.85)
             theme_vars['accent_dark'] = mix_color(a, 'black', 0.85)
             
-        bg = global_settings.theme_color_background
+        bg = clamp_color_darkness(global_settings.theme_color_background, max_brightness=45)
         if bg and bg != 'default':
             theme_vars['bg'] = bg
             theme_vars['bg_card'] = mix_color(bg, 'white', 0.92)
@@ -265,14 +602,14 @@ def inject_globals():
             theme_vars['bg_input'] = mix_color(bg, 'white', 0.96)
             theme_vars['border'] = mix_color(bg, 'white', 0.80)
             
-        btn_clear = global_settings.theme_btn_clear_color
+        btn_clear = clamp_color_darkness(global_settings.theme_btn_clear_color, max_brightness=140)
         if btn_clear and btn_clear != 'default':
             theme_vars['btn_clear_color'] = btn_clear
             theme_vars['btn_clear_bg'] = color_alpha(btn_clear, 0.12)
             theme_vars['btn_clear_border'] = color_alpha(btn_clear, 0.30)
             theme_vars['btn_clear_hover_bg'] = btn_clear
             
-        btn_charge = global_settings.theme_btn_charge_color
+        btn_charge = clamp_color_darkness(global_settings.theme_btn_charge_color, max_brightness=140)
         if btn_charge and btn_charge != 'default':
             theme_vars['btn_charge_color'] = btn_charge
             theme_vars['btn_charge_bg_start'] = mix_color(btn_charge, 'black', 0.80)
@@ -282,12 +619,22 @@ def inject_globals():
             theme_vars['btn_charge_hover_bg_end'] = mix_color(btn_charge, 'white', 0.80)
             theme_vars['btn_charge_hover_glow'] = color_alpha(btn_charge, 0.50)
 
+    pending_orders = 0
+    if current_user.is_authenticated and hasattr(current_user, 'store_id') and current_user.store_id:
+        try:
+            pending_orders = Order.query.filter_by(store_id=current_user.store_id, status='pendiente').count()
+        except Exception:
+            pending_orders = 0
+
     return dict(
-        cashier_mode=False,
-        active_cashier_name='',
-        pending_orders_count=0,
+        cashier_mode=is_cashier_mode() if current_user.is_authenticated and isinstance(current_user, User) else False,
+        active_cashier_name=session.get('active_cashier_name', None),
+        active_cashier_id=session.get('active_cashier_id', None),
+        pending_orders_count=pending_orders,
         global_settings=global_settings,
-        theme_vars=theme_vars
+        theme_vars=theme_vars,
+        format_weight=format_weight_filter,
+        format_cop=cop_filter
     )
 
 def log_audit(action, description, user_id=None, severity='INFO'):
@@ -364,20 +711,40 @@ def validate_price(price_str):
 @app.route('/')
 def index():
     if current_user.is_authenticated:
-        return redirect(url_for('settings'))
+        return redirect(url_for('pos'))
     return redirect(url_for('login'))
+
+@app.route('/verify-admin', methods=['GET', 'POST'])
+@login_required
+def verify_admin():
+    """Doble confirmación con contraseña de administrador antes de entrar a zonas críticas."""
+    next_url = request.args.get('next') or url_for('settings')
+    
+    if request.method == 'POST':
+        password = request.form.get('password', '')
+        if current_user.check_password(password):
+            session['admin_unlocked'] = True
+            session.permanent = True
+            return redirect(next_url)
+        else:
+            flash('Contraseña de seguridad incorrecta. Acceso denegado.', 'error')
+            
+    return render_template('verificar_admin.html', next=next_url)
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if current_user.is_authenticated:
-        return redirect(url_for('settings'))
+        return redirect(url_for('pos'))
         
     if request.method == 'POST':
-        email = request.form.get('email')
-        password = request.form.get('password')
+        email = (request.form.get('email') or '').strip().lower()
+        password = request.form.get('password', '')
         user = User.query.filter_by(email=email).first()
         
         if user and user.check_password(password):
+            if not user.is_admin:
+                flash('Solo los administradores pueden iniciar sesión aquí.', 'error')
+                return render_template('inicio_sesion.html')
             if user.status == 'BLOQUEADO':
                 flash('Tu cuenta está bloqueada. Contacta al administrador.', 'error')
                 log_audit('LOGIN_BLOCKED', f'Intento de login con cuenta bloqueada: {email}', user.id, 'WARNING')
@@ -386,9 +753,15 @@ def login():
             user.failed_attempts = 0
             user.last_login = datetime.now()
             db.session.commit()
+
+            # Limpiar cualquier modo cajero previo de la sesión
+            session.pop('cashier_mode', None)
+            session.pop('active_cashier_id', None)
+            session.pop('active_cashier_name', None)
+            
             login_user(user)
-            log_audit('LOGIN', f'Inicio de sesión exitoso para {user.name} ({user.email})', user.id)
-            return redirect(url_for('settings'))
+            log_audit('LOGIN', f'Inicio de sesión exitoso para administrador {user.name} ({user.email})', user.id)
+            return redirect(url_for('pos'))
         else:
             if user:
                 user.failed_attempts += 1
@@ -403,82 +776,842 @@ def login():
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
-    if request.method == 'POST':
-        store_name = request.form.get('store_name', 'Mi Tienda')
-        name = request.form.get('name')
-        email = request.form.get('email')
-        password = request.form.get('password')
-        password_confirm = request.form.get('password_confirm')
+    if current_user.is_authenticated:
+        return redirect(url_for('pos'))
         
+    if request.method == 'POST':
+        store_name = request.form.get('store_name', '').strip() or 'Mi Tienda'
+        name = request.form.get('name', '').strip()
+        email = request.form.get('email', '').strip().lower()
+        password = request.form.get('password', '')
+        password_confirm = request.form.get('password_confirm', '')
+        
+        if not store_name or len(store_name) < 2:
+            flash('El nombre de la tienda debe tener al menos 2 caracteres.', 'error')
+            return render_template('registro.html')
+            
+        if not email or '@' not in email:
+            flash('Ingresa un correo electrónico válido.', 'error')
+            return render_template('registro.html')
+            
+        if not password or len(password) < 6:
+            flash('La contraseña debe tener al menos 6 caracteres.', 'error')
+            return render_template('registro.html')
+            
         if password != password_confirm:
             flash('Las contraseñas no coinciden.', 'error')
-            return redirect(url_for('register'))
+            return render_template('registro.html')
 
         if User.query.filter_by(email=email).first():
             flash('El correo ya está registrado.', 'error')
-            return redirect(url_for('register'))
+            return render_template('registro.html')
         
-        new_store = Store(name=store_name)
-        db.session.add(new_store)
-        db.session.flush()
+        # Generar código de 6 dígitos y guardar verificación pendiente
+        code = generate_verification_code()
+        EmailVerification.query.filter_by(email=email, verified=False).delete()
         
-        # Crear configuración inicial de la tienda
-        store_settings = StoreSettings(store_id=new_store.id, store_name=store_name)
-        db.session.add(store_settings)
-            
-        new_user = User(store_id=new_store.id, name=name, email=email, is_admin=True)
-        new_user.set_password(password)
-        db.session.add(new_user)
+        verification = EmailVerification(
+            email=email,
+            code=code,
+            store_name=store_name,
+            user_name=name,
+            password_hash=generate_password_hash(password),
+            expires_at=datetime.now() + timedelta(minutes=10)
+        )
+        db.session.add(verification)
         db.session.commit()
         
-        log_audit('REGISTER', f'Nuevo usuario registrado: {name} ({email}) - Tienda: {store_name}', new_user.id)
-        flash('Registro exitoso. Ahora puedes iniciar sesión.', 'success')
-        return redirect(url_for('login'))
-        
+        # Enviar código por correo
+        if send_verification_email(email, code):
+            session['pending_verification_email'] = email
+            flash('Se ha enviado un código de verificación a tu correo electrónico.', 'success')
+            return redirect(url_for('verify_email'))
+        else:
+            flash('Error al enviar el correo de verificación. Verifica que el correo sea válido e intenta de nuevo.', 'error')
+            return render_template('registro.html')
+            
     return render_template('registro.html')
 
-@app.route('/customer/login', endpoint='customer_login', methods=['GET', 'POST'])
-def customer_login_view():
-    if request.method == 'POST':
-        email = request.form.get('email')
-        password = request.form.get('password')
-        customer = Customer.query.filter_by(email=email).first()
-        
-        if customer and customer.check_password(password):
-            login_user(customer)
-            return redirect(url_for('dashboard'))
-        else:
-            flash('Email o contraseña incorrectos.', 'error')
-            
-    return render_template('customer_login.html')
 
+@app.route('/verify-email', methods=['GET', 'POST'])
+def verify_email():
+    if current_user.is_authenticated:
+        return redirect(url_for('pos'))
+        
+    pending_email = session.get('pending_verification_email')
+    if not pending_email:
+        flash('No hay verificación pendiente. Regístrate primero.', 'error')
+        return redirect(url_for('register'))
+        
+    verification = EmailVerification.query.filter_by(
+        email=pending_email, verified=False
+    ).order_by(EmailVerification.created_at.desc()).first()
+    
+    if not verification:
+        session.pop('pending_verification_email', None)
+        flash('Verificación no encontrada. Regístrate de nuevo.', 'error')
+        return redirect(url_for('register'))
+        
+    expired = datetime.now() > verification.expires_at
+    
+    if request.method == 'POST':
+        entered_code = request.form.get('code', '').strip()
+        
+        if expired:
+            flash('El código ha expirado. Solicita uno nuevo.', 'error')
+            return render_template('verificar_email.html', email=pending_email, expired=True)
+            
+        if verification.attempts >= 5:
+            flash('Demasiados intentos fallidos. Solicita un nuevo código.', 'error')
+            return render_template('verificar_email.html', email=pending_email, expired=True)
+            
+        if entered_code == verification.code:
+            verification.verified = True
+            try:
+                # 1. Crear Tienda
+                store = Store(name=verification.store_name)
+                db.session.add(store)
+                db.session.flush()
+                
+                # 2. Crear Configuración
+                settings_obj = StoreSettings(store_id=store.id, store_name=verification.store_name)
+                db.session.add(settings_obj)
+                
+                # 3. Crear Categorías y Subcategorías por defecto
+                default_categories = [
+                    ('Bebidas', 'bebidas', 'Bebidas.jpg', 'Gaseosas, jugos, agua y más', [('Gaseosas', 'gaseosas'), ('Jugos', 'jugos'), ('Bebidas Alcohólicas', 'alcoholicas')]),
+                    ('Lácteos', 'lacteos', 'Lácteos.avif', 'Leche, queso, yogurt y derivados', [('Leche', 'leche'), ('Yogures', 'yogures'), ('Quesos', 'quesos'), ('Mantequillas', 'mantequillas')]),
+                    ('Despensa', 'despensa', 'Despensa.jfif', 'Granos, aceites, enlatados y básicos', [('Granos y Cereales', 'granos'), ('Enlatados', 'enlatados'), ('Aceites y Vinagres', 'aceites'), ('Condimentos y Salsas', 'condimentos'), ('Harinas y Repostería', 'harinas'), ('Pastas', 'pastas')]),
+                    ('Snacks', 'snacks', 'Snacks.jfif', 'Papas, galletas, dulces y antojos', [('Ponqués y Dulces', 'dulces'), ('Paquetes de Papas', 'papas'), ('Galletas', 'galletas')]),
+                    ('Frescos', 'frescos', 'frescos.webp', 'Frutas, verduras y productos frescos', [('Frutas y Verduras', 'frutas'), ('Carnicería', 'carniceria'), ('Quesos Frescos', 'quesos_frescos'), ('Panadería', 'panaderia')]),
+                    ('Limpieza y Aseo', 'limpieza_y_aseo', 'limpieza_y_aseo.jfif', 'Jabones, detergentes y aseo del hogar', [('Detergentes', 'detergentes'), ('Desinfectantes', 'desinfectantes'), ('Aseo Personal', 'aseo_personal'), ('Aseo del Hogar', 'aseo_hogar')]),
+                    ('Farmacia', 'farmacia', 'Farmacia.jfif', 'Medicamentos y cuidado personal', [('Medicamentos', 'medicamentos'), ('Cuidado Personal', 'cuidado_personal'), ('Vitaminas y Suplementos', 'vitaminas'), ('Primeros Auxilios', 'primeros_auxilios')]),
+                    ('Mascotas', 'mascotas', 'Mascotas.jfif', 'Alimentos y accesorios para mascotas', [('Comida para Perros', 'perros'), ('Comida para Gatos', 'gatos'), ('Accesorios', 'accesorios_mascotas')]),
+                ]
+                for i, (cat_name, cat_slug, cat_img, cat_desc, subs) in enumerate(default_categories, start=1):
+                    cat = Category(
+                        store_id=store.id,
+                        name=cat_name,
+                        slug=cat_slug,
+                        image=cat_img,
+                        description=cat_desc,
+                        display_order=i,
+                        visible_in_pos=True
+                    )
+                    db.session.add(cat)
+                    db.session.flush()
+                    for j, (sub_name, sub_slug) in enumerate(subs, start=1):
+                        sub = Subcategory(
+                            store_id=store.id,
+                            category_id=cat.id,
+                            name=sub_name,
+                            slug=sub_slug,
+                            display_order=j
+                        )
+                        db.session.add(sub)
+                
+                # 4. Crear Usuario Administrador
+                user = User(
+                    store_id=store.id,
+                    name=verification.user_name,
+                    email=verification.email,
+                    password_hash=verification.password_hash,
+                    is_admin=True
+                )
+                db.session.add(user)
+                db.session.commit()
+                
+                log_audit('REGISTER_VERIFIED', f'Usuario verificado y registrado: {user.name} ({user.email}) - Tienda: {store.name}', user.id)
+                session.pop('pending_verification_email', None)
+                login_user(user)
+                flash('¡Cuenta creada y verificada exitosamente! Bienvenido a MercAPP.', 'success')
+                return redirect(url_for('pos'))
+            except Exception as e:
+                db.session.rollback()
+                flash('Error al crear la cuenta, intenta de nuevo.', 'error')
+                print(e)
+        else:
+            verification.attempts += 1
+            db.session.commit()
+            remaining = 5 - verification.attempts
+            flash(f'Código incorrecto. Te quedan {remaining} intentos.', 'error')
+            
+    return render_template('verificar_email.html', email=pending_email, expired=expired)
+
+
+@app.route('/resend-code', methods=['POST'])
+def resend_code():
+    pending_email = session.get('pending_verification_email')
+    if not pending_email:
+        flash('No hay verificación pendiente.', 'error')
+        return redirect(url_for('register'))
+        
+    old_verification = EmailVerification.query.filter_by(
+        email=pending_email
+    ).order_by(EmailVerification.created_at.desc()).first()
+    
+    if not old_verification:
+        flash('Verificación no encontrada. Regístrate de nuevo.', 'error')
+        return redirect(url_for('register'))
+        
+    code = generate_verification_code()
+    EmailVerification.query.filter_by(email=pending_email, verified=False).delete()
+    
+    verification = EmailVerification(
+        email=pending_email,
+        code=code,
+        store_name=old_verification.store_name,
+        user_name=old_verification.user_name,
+        password_hash=old_verification.password_hash,
+        expires_at=datetime.now() + timedelta(minutes=10)
+    )
+    db.session.add(verification)
+    db.session.commit()
+    
+    if send_verification_email(pending_email, code):
+        flash('Se ha enviado un nuevo código de verificación a tu correo.', 'success')
+    else:
+        flash('Error al reenviar el correo. Intenta de nuevo más tarde.', 'error')
+        
+    return redirect(url_for('verify_email'))
+
+
+@app.route('/forgot-password', methods=['GET', 'POST'])
+def forgot_password():
+    if current_user.is_authenticated:
+        return redirect(url_for('pos'))
+        
+    if request.method == 'POST':
+        email = request.form.get('email', '').strip()
+        user = User.query.filter_by(email=email).first()
+        
+        if user:
+            PasswordReset.query.filter_by(user_id=user.id, used=False).delete()
+            token = secrets.token_urlsafe(32)
+            reset_record = PasswordReset(
+                user_id=user.id,
+                token=token,
+                expires_at=datetime.now() + timedelta(hours=1)
+            )
+            db.session.add(reset_record)
+            db.session.commit()
+            
+            if send_reset_email(user, token):
+                flash('Se ha enviado un enlace de recuperación a tu correo.', 'success')
+            else:
+                flash('Error al enviar el correo. Intenta de nuevo más tarde.', 'error')
+        else:
+            flash('Si existe una cuenta asociada a ese correo, recibirás un enlace en unos momentos.', 'success')
+            
+        return redirect(url_for('login'))
+        
+    return render_template('forgot_password.html')
+
+
+@app.route('/reset-password/<token>', methods=['GET', 'POST'])
+def reset_password(token):
+    if current_user.is_authenticated:
+        return redirect(url_for('pos'))
+        
+    reset_record = PasswordReset.query.filter_by(token=token, used=False).first()
+    
+    if not reset_record or datetime.now() > reset_record.expires_at:
+        flash('El enlace de recuperación es inválido o ha expirado.', 'error')
+        return redirect(url_for('forgot_password'))
+        
+    if request.method == 'POST':
+        password = request.form.get('password')
+        confirm = request.form.get('confirm_password')
+        
+        if not password or len(password) < 6:
+            flash('La contraseña debe tener al menos 6 caracteres.', 'error')
+            return render_template('reset_password.html', token=token)
+            
+        if password != confirm:
+            flash('Las contraseñas no coinciden.', 'error')
+            return render_template('reset_password.html', token=token)
+            
+        user = reset_record.user
+        user.set_password(password)
+        reset_record.used = True
+        db.session.commit()
+        
+        flash('Tu contraseña ha sido actualizada exitosamente. Ya puedes iniciar sesión.', 'success')
+        return redirect(url_for('login'))
+        
+    return render_template('reset_password.html', token=token)
+
+# ====================================================================
+# CUSTOMER STOREFRONT & ORDERS (B2C)
+# ====================================================================
+
+# ============================================================
+# LICENSING SYSTEM
+# ============================================================
+@app.before_request
+def check_license():
+    # Allow static files, license endpoints, sync and error handlers
+    if request.endpoint in ['static', 'license', 'api_renovar_licencia', 'api_sync_status', 'api_health', 'internal_error', 'handle_exception']:
+        return
+    
+    try:
+        license_record = AppLicense.query.first()
+        if license_record:
+            now = datetime.now()
+            
+            # Anti-tamper: if system clock is older than our last check, user moved time backward
+            if license_record.last_time_checked and now < license_record.last_time_checked:
+                flash('El reloj del sistema es incorrecto (fecha anterior a la esperada). Por favor ajusta la hora de Windows.', 'error')
+                return redirect(url_for('license'))
+            
+            if now > license_record.expiration_date:
+                return redirect(url_for('license'))
+                
+            # Update last_time_checked every hour to save DB writes but keep track of time
+            if not license_record.last_time_checked or (now - license_record.last_time_checked).total_seconds() > 3600:
+                license_record.last_time_checked = now
+                db.session.commit()
+    except Exception:
+        pass  # If DB isn't initialized yet
+
+
+@app.before_request
+def restrict_customer_access():
+    """Restringir acceso para que clientes solo vean rutas de tienda/pedidos y administradores vean el POS."""
+    if current_user.is_authenticated and isinstance(current_user, Customer):
+        allowed_prefixes = ('/c/', '/customer/', '/api/c/', '/api/customer/', '/static/', '/logout')
+        if not any(request.path.startswith(prefix) for prefix in allowed_prefixes) and request.path != '/logout':
+            return redirect(url_for('customer_stores'))
+            
+    if current_user.is_authenticated and isinstance(current_user, User):
+        customer_prefixes = ('/c/', '/customer/', '/api/c/', '/api/customer/')
+        exempt_paths = (
+            '/c/login', '/customer/login',
+            '/c/register', '/customer/register',
+            '/c/verify-email', '/customer/verify-email',
+            '/c/resend-code', '/customer/resend-code',
+            '/c/logout', '/customer/logout'
+        )
+        if any(request.path.startswith(prefix) for prefix in customer_prefixes) and request.path not in exempt_paths:
+            return redirect(url_for('pos'))
+
+
+@app.route('/c/register', methods=['GET', 'POST'])
 @app.route('/customer/register', endpoint='customer_register', methods=['GET', 'POST'])
 def customer_register_view():
-    if request.method == 'POST':
-        name = request.form.get('name')
-        email = request.form.get('email')
-        phone = request.form.get('phone')
-        address = request.form.get('address')
-        password = request.form.get('password')
+    if current_user.is_authenticated and isinstance(current_user, Customer):
+        return redirect(url_for('customer_stores'))
         
+    if request.method == 'POST':
+        name = request.form.get('name', '').strip()
+        email = request.form.get('email', '').strip().lower()
+        phone = request.form.get('phone', '').strip()
+        address = request.form.get('address', '').strip()
+        password = request.form.get('password', '')
+        
+        if not name or not email or not phone or not password:
+            flash('Por favor completa todos los campos obligatorios.', 'error')
+            return render_template('customer_register.html')
+            
         if Customer.query.filter_by(email=email).first():
             flash('El correo ya está registrado.', 'error')
             return redirect(url_for('customer_register'))
             
-        new_customer = Customer(name=name, email=email, phone=phone, address=address)
-        new_customer.set_password(password)
-        db.session.add(new_customer)
+        code = ''.join([str(secrets.randbelow(10)) for _ in range(6)])
+        verification = CustomerEmailVerification(
+            name=name,
+            email=email,
+            phone=phone,
+            address=address,
+            password_hash=generate_password_hash(password),
+            code=code,
+            expires_at=datetime.now() + timedelta(minutes=10)
+        )
+        db.session.add(verification)
         db.session.commit()
         
-        flash('Registro exitoso. Ahora puedes iniciar sesión como cliente.', 'success')
-        return redirect(url_for('customer_login'))
-        
+        if send_verification_email(email, code):
+            session['pending_customer_verification_email'] = email
+            flash('Se ha enviado un código de verificación de 6 dígitos a tu correo.', 'success')
+            return redirect(url_for('customer_verify_email'))
+        else:
+            flash('Error al enviar el correo de verificación. Intenta nuevamente.', 'error')
+            return render_template('customer_register.html')
+            
     return render_template('customer_register.html')
 
-@app.route('/dashboard')
+
+@app.route('/c/verify-email', methods=['GET', 'POST'])
+@app.route('/customer/verify-email', endpoint='customer_verify_email', methods=['GET', 'POST'])
+def customer_verify_email():
+    if current_user.is_authenticated and isinstance(current_user, Customer):
+        return redirect(url_for('customer_stores'))
+        
+    pending_email = session.get('pending_customer_verification_email')
+    if not pending_email:
+        flash('No hay verificación de cliente pendiente. Regístrate primero.', 'error')
+        return redirect(url_for('customer_register'))
+        
+    verification = CustomerEmailVerification.query.filter_by(
+        email=pending_email, verified=False
+    ).order_by(CustomerEmailVerification.created_at.desc()).first()
+    
+    if not verification:
+        session.pop('pending_customer_verification_email', None)
+        flash('Verificación no encontrada. Regístrate de nuevo.', 'error')
+        return redirect(url_for('customer_register'))
+        
+    expired = datetime.now() > verification.expires_at
+    
+    if request.method == 'POST':
+        entered_code = request.form.get('code', '').strip()
+        
+        if expired:
+            flash('El código ha expirado. Solicita uno nuevo.', 'error')
+            return render_template('customer_verificar_email.html', email=pending_email, expired=True)
+            
+        if verification.attempts >= 5:
+            flash('Demasiados intentos fallidos. Solicita un nuevo código.', 'error')
+            return render_template('customer_verificar_email.html', email=pending_email, expired=True)
+            
+        if entered_code == verification.code:
+            verification.verified = True
+            customer = Customer(
+                name=verification.name,
+                email=verification.email,
+                phone=verification.phone,
+                address=verification.address,
+                password_hash=verification.password_hash
+            )
+            db.session.add(customer)
+            db.session.commit()
+            
+            session.pop('pending_customer_verification_email', None)
+            login_user(customer)
+            flash(f'¡Bienvenido {customer.name}! Tu cuenta ha sido activada.', 'success')
+            return redirect(url_for('customer_stores'))
+        else:
+            verification.attempts += 1
+            db.session.commit()
+            flash('Código de verificación incorrecto.', 'error')
+            return render_template('customer_verificar_email.html', email=pending_email, expired=False)
+            
+    return render_template('customer_verificar_email.html', email=pending_email, expired=expired)
+
+
+@app.route('/c/resend-code', methods=['POST'])
+@app.route('/customer/resend-code', endpoint='customer_resend_code', methods=['POST'])
+def customer_resend_code():
+    pending_email = session.get('pending_customer_verification_email')
+    if not pending_email:
+        flash('No hay verificación pendiente.', 'error')
+        return redirect(url_for('customer_register'))
+        
+    verification = CustomerEmailVerification.query.filter_by(
+        email=pending_email, verified=False
+    ).order_by(CustomerEmailVerification.created_at.desc()).first()
+    
+    if not verification:
+        flash('Verificación no encontrada.', 'error')
+        return redirect(url_for('customer_register'))
+        
+    code = ''.join([str(secrets.randbelow(10)) for _ in range(6)])
+    verification.code = code
+    verification.attempts = 0
+    verification.expires_at = datetime.now() + timedelta(minutes=10)
+    db.session.commit()
+    
+    send_verification_email(pending_email, code)
+    flash('Se ha enviado un nuevo código de verificación a tu correo.', 'success')
+    return redirect(url_for('customer_verify_email'))
+
+
+@app.route('/c/login', methods=['GET', 'POST'])
+@app.route('/customer/login', endpoint='customer_login', methods=['GET', 'POST'])
+def customer_login_view():
+    if current_user.is_authenticated and isinstance(current_user, Customer):
+        return redirect(url_for('customer_stores'))
+        
+    if request.method == 'POST':
+        email = request.form.get('email', '').strip().lower()
+        password = request.form.get('password', '')
+        customer = Customer.query.filter_by(email=email).first()
+        
+        if customer and customer.check_password(password):
+            login_user(customer)
+            flash(f'¡Bienvenido de nuevo, {customer.name}!', 'success')
+            return redirect(url_for('customer_stores'))
+        else:
+            flash('Correo o contraseña incorrectos.', 'error')
+            
+    return render_template('customer_login.html')
+
+
+@app.route('/c/logout')
+@app.route('/customer/logout', endpoint='customer_logout')
 @login_required
-def dashboard():
-    return redirect(url_for('settings'))
+def customer_logout():
+    logout_user()
+    flash('Has cerrado sesión correctamente.', 'success')
+    return redirect(url_for('customer_login'))
+
+
+@app.route('/c/stores')
+@app.route('/customer/stores', endpoint='customer_stores')
+@login_required
+def customer_stores():
+    if not isinstance(current_user, Customer):
+        return redirect(url_for('login'))
+    stores = Store.query.filter_by(is_active=True).all()
+    return render_template('customer_stores.html', stores=stores)
+
+
+@app.route('/c/store/<int:store_id>', endpoint='customer_store')
+@app.route('/customer/catalog/<int:store_id>', endpoint='customer_catalog')
+@login_required
+def customer_store(store_id):
+    if not isinstance(current_user, Customer):
+        return redirect(url_for('login'))
+    store = db.session.get(Store, store_id)
+    if not store:
+        abort(404)
+    
+    categories = Category.query.filter_by(store_id=store_id).order_by(Category.display_order.asc(), Category.name.asc()).all()
+    products = Product.query.filter_by(store_id=store_id, is_active=True).order_by(Product.name.asc()).all()
+    
+    return render_template('customer_catalog.html', store=store, categories=categories, products=products)
+
+
+@app.route('/api/c/order', methods=['POST'])
+@app.route('/api/customer/order', endpoint='api_customer_order', methods=['POST'])
+@login_required
+def api_customer_order():
+    if not isinstance(current_user, Customer):
+        return jsonify({'success': False, 'error': 'No autorizado'}), 403
+        
+    data = request.get_json()
+    if not data:
+        return jsonify({'success': False, 'error': 'Datos vacíos'}), 400
+        
+    store_id = data.get('store_id')
+    items = data.get('items', [])
+    order_type = data.get('order_type', 'domicilio')
+    payment_method = data.get('payment_method', 'efectivo')
+    
+    store = db.session.get(Store, store_id)
+    if not store:
+        return jsonify({'success': False, 'error': 'Tienda no encontrada'}), 404
+        
+    if not items:
+        return jsonify({'success': False, 'error': 'El carrito está vacío'}), 400
+        
+    subtotal = 0
+    order_items = []
+    
+    for item in items:
+        product_id = item.get('id')
+        qty = float(item.get('qty', 1))
+        
+        product = db.session.get(Product, product_id)
+        if not product or not product.is_active or product.store_id != store_id:
+            return jsonify({'success': False, 'error': 'Producto no disponible'}), 400
+            
+        weight_grams = None
+        weight_unit = None
+        if getattr(product, 'sell_by_weight', False):
+            item_subtotal = round_to_50(product.price * qty)
+            weight_grams = int(qty * 1000) if product.weight_unit == 'kg' else int(qty * 500)
+            weight_unit = product.weight_unit
+        else:
+            item_subtotal = int(product.price * qty)
+            
+        subtotal += item_subtotal
+        
+        order_item = OrderItem(
+            product_id=product.id,
+            quantity=qty,
+            unit_price=product.price,
+            subtotal=item_subtotal,
+            weight_grams=weight_grams,
+            weight_unit=weight_unit
+        )
+        order_items.append(order_item)
+        
+    total = subtotal
+    
+    order = Order(
+        store_id=store_id,
+        customer_id=current_user.id,
+        customer_name=current_user.name,
+        customer_phone=current_user.phone,
+        customer_address=current_user.address if order_type == 'domicilio' else '',
+        order_type=order_type,
+        payment_method=payment_method,
+        delivery_cost=0,
+        subtotal=subtotal,
+        total=total,
+        status='pendiente',
+        items=order_items
+    )
+    
+    db.session.add(order)
+    db.session.commit()
+    
+    return jsonify({'success': True, 'order_id': order.id})
+
+
+@app.route('/c/orders')
+@app.route('/customer/orders', endpoint='customer_orders')
+@login_required
+def customer_orders():
+    if not isinstance(current_user, Customer):
+        return redirect(url_for('login'))
+        
+    orders = Order.query.filter_by(customer_id=current_user.id).order_by(Order.created_at.desc()).all()
+    return render_template('customer_orders.html', orders=orders)
+
+
+@app.route('/api/c/order/<int:order_id>/cancel', methods=['POST'])
+@app.route('/api/customer/order/<int:order_id>/cancel', endpoint='api_customer_cancel_order', methods=['POST'])
+@login_required
+def api_customer_cancel_order(order_id):
+    if not isinstance(current_user, Customer):
+        return jsonify({'success': False, 'error': 'No autorizado'}), 403
+        
+    order = db.session.get(Order, order_id)
+    if not order or order.customer_id != current_user.id:
+        return jsonify({'success': False, 'error': 'Pedido no encontrado'}), 404
+        
+    if order.status != 'pendiente':
+        return jsonify({'success': False, 'error': 'Solo se pueden cancelar pedidos pendientes'}), 400
+        
+    order.status = 'cancelado'
+    db.session.commit()
+    return jsonify({'success': True})
+
+
+@app.route('/api/c/order/<int:order_id>/read-notifications', methods=['POST'])
+@app.route('/api/customer/order/<int:order_id>/read-notifications', endpoint='api_customer_read_notifications', methods=['POST'])
+@login_required
+def api_customer_read_notifications(order_id):
+    if not isinstance(current_user, Customer):
+        return jsonify({'success': False, 'error': 'No autorizado'}), 403
+        
+    order = db.session.get(Order, order_id)
+    if not order or order.customer_id != current_user.id:
+        return jsonify({'success': False, 'error': 'Pedido no encontrado'}), 404
+        
+    unread_notifs = OrderNotification.query.filter_by(order_id=order_id, is_read=False).all()
+    for n in unread_notifs:
+        n.is_read = True
+    db.session.commit()
+    return jsonify({'success': True})
+
+
+# ====================================================================
+# ADMIN STORE ORDERS ROUTES
+# ====================================================================
+
+@app.route('/orders')
+@login_required
+def orders():
+    """Manage store customer orders."""
+    active_orders = Order.query.filter(
+        Order.store_id == current_user.store_id,
+        Order.status.in_(['pendiente', 'confirmado'])
+    ).order_by(Order.created_at.desc()).all()
+    
+    now = datetime.now()
+    history_start = now - timedelta(days=2)
+    history_orders = Order.query.filter(
+        Order.store_id == current_user.store_id,
+        Order.status.in_(['completado', 'cancelado']),
+        Order.created_at >= history_start
+    ).order_by(Order.created_at.desc()).all()
+    
+    return render_template('pedidos.html', active_orders=active_orders, history_orders=history_orders)
+
+
+@app.route('/api/order', methods=['POST'])
+@login_required
+def api_create_order():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'message': 'Datos inválidos.'}), 400
+            
+        items = data.get('items', [])
+        customer_name = data.get('customer_name', '').strip()
+        customer_phone = data.get('customer_phone', '').strip()
+        
+        if not items:
+            return jsonify({'success': False, 'message': 'El carrito está vacío.'}), 400
+        if not customer_name or not customer_phone:
+            return jsonify({'success': False, 'message': 'Nombre y teléfono son requeridos.'}), 400
+            
+        order_type = data.get('order_type', 'domicilio')
+        customer_address = data.get('customer_address', '').strip() if order_type == 'domicilio' else None
+        
+        delivery_cost = int(data.get('delivery_cost', 0))
+        payment_method = data.get('payment_method', 'efectivo')
+        notes = data.get('notes', '').strip()
+        
+        subtotal = 0
+        order_items = []
+        
+        for item in items:
+            if item.get('is_custom'):
+                custom_name = item.get('custom_name', 'Varios').strip()
+                if not custom_name: custom_name = 'Varios'
+                custom_price = int(item.get('custom_price', 0))
+                
+                fallback_cat = Category.query.filter_by(store_id=current_user.store_id).first()
+                product = Product(
+                    store_id=current_user.store_id,
+                    name=f"Varios - {custom_name}",
+                    price=custom_price,
+                    category_id=fallback_cat.id if fallback_cat else 1,
+                    is_active=False,
+                    barcode='__CUSTOM__'
+                )
+                db.session.add(product)
+                db.session.flush()
+            else:
+                product = db.session.get(Product, item.get('product_id'))
+                if not product or product.store_id != current_user.store_id:
+                    return jsonify({'success': False, 'message': 'Producto no encontrado.'}), 400
+                    
+            if getattr(product, 'sell_by_weight', False) and not item.get('is_custom'):
+                weight_grams = item.get('weight_grams', 0)
+                if product.weight_unit == 'lb':
+                    item_subtotal = round_to_50(product.price * (weight_grams / 500.0))
+                else:
+                    item_subtotal = round_to_50(product.price * (weight_grams / 1000.0))
+                
+                subtotal += item_subtotal
+                order_items.append(OrderItem(
+                    product_id=product.id,
+                    quantity=1,
+                    unit_price=product.price,
+                    subtotal=item_subtotal,
+                    weight_grams=weight_grams,
+                    weight_unit=product.weight_unit
+                ))
+            else:
+                quantity = item.get('quantity', 0)
+                item_subtotal = product.price * quantity
+                subtotal += item_subtotal
+                
+                order_items.append(OrderItem(
+                    product_id=product.id,
+                    quantity=quantity,
+                    unit_price=product.price,
+                    subtotal=item_subtotal
+                ))
+                
+        total = subtotal + delivery_cost
+        
+        order = Order(
+            store_id=current_user.store_id,
+            user_id=get_effective_user_id(),
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            customer_address=customer_address,
+            order_type=order_type,
+            payment_method=payment_method,
+            delivery_cost=delivery_cost,
+            subtotal=subtotal,
+            total=total,
+            status='pendiente',
+            notes=notes
+        )
+        db.session.add(order)
+        db.session.flush()
+        
+        for oi in order_items:
+            oi.order_id = order.id
+            db.session.add(oi)
+            
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Pedido guardado exitosamente.',
+            'order_id': order.id,
+            'total_formatted': format_cop(total)
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
+
+
+@app.route('/api/order/<int:order_id>', methods=['GET'])
+@login_required
+def api_get_order(order_id):
+    """Get order details to load into POS."""
+    order = db.session.get(Order, order_id)
+    if not order or order.store_id != current_user.store_id:
+        return jsonify({'success': False, 'message': 'Pedido no encontrado.'}), 404
+        
+    items = []
+    for item in order.items:
+        items.append({
+            'product_id': item.product.id,
+            'name': item.product.name,
+            'barcode': item.product.barcode,
+            'price': item.unit_price,
+            'price_formatted': format_cop(item.unit_price),
+            'quantity': item.quantity,
+            'subtotal': item.subtotal,
+            'subtotal_formatted': format_cop(item.subtotal),
+            'weight_grams': item.weight_grams,
+            'weight_unit': item.weight_unit,
+            'sell_by_weight': item.product.sell_by_weight,
+            'is_custom': item.product.barcode == '__CUSTOM__'
+        })
+        
+    return jsonify({
+        'success': True,
+        'order': {
+            'id': order.id,
+            'customer_name': order.customer_name,
+            'customer_phone': order.customer_phone,
+            'order_type': order.order_type,
+            'delivery_cost': order.delivery_cost,
+            'subtotal': order.subtotal,
+            'total': order.total,
+            'payment_method': order.payment_method,
+            'notes': order.notes,
+            'items': items
+        }
+    })
+
+
+@app.route('/api/order/<int:order_id>/status', methods=['POST'])
+@login_required
+def api_update_order_status(order_id):
+    """Update order status and optionally send internal notification message."""
+    order = db.session.get(Order, order_id)
+    if not order or order.store_id != current_user.store_id:
+        return jsonify({'success': False, 'message': 'Pedido no encontrado.'}), 404
+        
+    data = request.get_json() or {}
+    new_status = data.get('status')
+    message = data.get('message', '').strip()
+    
+    if new_status in ['pendiente', 'confirmado', 'completado', 'cancelado']:
+        order.status = new_status
+        
+        if message:
+            notif = OrderNotification(order_id=order.id, message=message)
+            db.session.add(notif)
+            
+        db.session.commit()
+        return jsonify({'success': True})
+        
+    return jsonify({'success': False, 'message': 'Estado inválido.'}), 400
+
 
 @app.route('/logout')
 @login_required
@@ -495,22 +1628,254 @@ def logout():
 # ROUTES — SETTINGS / CENTRO DE CONTROL
 # ============================================================
 
-@app.route('/settings', methods=['GET', 'POST'])
+@app.route('/settings')
 @login_required
+@admin_only
 def settings():
     """Centro de Control (Configuración General)."""
+    license_record = AppLicense.query.first()
+    days_left = 0
+    if license_record:
+        delta = license_record.expiration_date - datetime.now()
+        days_left = max(0, delta.days)
+    return render_template('config_hub.html', license_record=license_record, days_left=days_left)
+
+
+@app.route('/licencia', methods=['GET', 'POST'])
+def license():
+    license_record = AppLicense.query.first()
+    if not license_record:
+        # Failsafe: lock on first run
+        license_record = AppLicense(expiration_date=datetime(2000, 1, 1), last_time_checked=datetime.now())
+        db.session.add(license_record)
+        db.session.commit()
+        
+    now = datetime.now()
+    is_expired = now > license_record.expiration_date
+    is_clock_wrong = license_record.last_time_checked and now < license_record.last_time_checked
+    
+    if not is_expired and not is_clock_wrong and request.method == 'GET':
+        return redirect(url_for('pos'))
+
     if request.method == 'POST':
-        password = request.form.get('password', '')
+        password = request.form.get('password')
         if password == 'Foreroyulian321.2026':
-            flash('Licencia renovada con éxito por 60 días adicionales.', 'success')
-            log_audit('LICENSE_RENEW', 'Licencia extendida 60 días', current_user.id)
+            license_record.expiration_date = datetime.now() + timedelta(days=60)
+            db.session.commit()
+            flash('Licencia activada por 60 días más.', 'success')
+            return redirect(url_for('pos'))
         else:
-            flash('Contraseña de seguridad incorrecta.', 'error')
-        return redirect(url_for('settings'))
-    return render_template('config_hub.html')
+            flash('Contraseña de desbloqueo incorrecta.', 'error')
+            
+    return render_template('licencia.html')
+
+
+@app.route('/api/renovar-licencia', methods=['POST'])
+@login_required
+def api_renovar_licencia():
+    password = request.form.get('password')
+    if password == 'Foreroyulian321.2026':
+        license_record = AppLicense.query.first()
+        if not license_record:
+            license_record = AppLicense(expiration_date=datetime.now() + timedelta(days=60), last_time_checked=datetime.now())
+            db.session.add(license_record)
+        else:
+            license_record.expiration_date = datetime.now() + timedelta(days=60)
+        db.session.commit()
+        flash('Licencia renovada exitosamente por 60 días más desde hoy.', 'success')
+    else:
+        flash('Contraseña de renovación incorrecta.', 'error')
+    
+    return redirect(url_for('settings'))
+
+
+
+@app.route('/dashboard')
+@login_required
+@admin_only
+def dashboard():
+    """Dashboard Integral 360° del Supermercado."""
+    store_id = current_user.store_id
+    now = datetime.now()
+    period = request.args.get('period', 'today')
+
+    # 1. Definición de rangos según periodo
+    if period == 'week':
+        start_date = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        end_date = now
+        period_label = 'Esta Semana'
+        prev_start = start_date - timedelta(days=7)
+        prev_end = start_date - timedelta(seconds=1)
+        prev_label = 'vs. semana anterior'
+    elif period == 'month':
+        start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        end_date = now
+        period_label = 'Este Mes'
+        first_this_month = start_date
+        last_prev_month = first_this_month - timedelta(days=1)
+        prev_start = last_prev_month.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        prev_end = last_prev_month.replace(hour=23, minute=59, second=59, microsecond=999999)
+        prev_label = 'vs. mes anterior'
+    else:
+        period = 'today'
+        start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_date = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+        period_label = 'Hoy'
+        prev_start = start_date - timedelta(days=1)
+        prev_end = start_date - timedelta(seconds=1)
+        prev_label = 'vs. ayer'
+
+    # 2. Ventas del periodo seleccionado
+    sales = Sale.query.filter(
+        Sale.store_id == store_id,
+        Sale.sale_date >= start_date,
+        Sale.sale_date <= end_date,
+        Sale.status == 'completada'
+    ).all()
+
+    total_sales = sum(s.total for s in sales)
+    sales_count = len(sales)
+    avg_ticket = int(total_sales / sales_count) if sales_count > 0 else 0
+
+    # 3. Ventas periodo anterior para cálculo de variación
+    prev_sales = Sale.query.filter(
+        Sale.store_id == store_id,
+        Sale.sale_date >= prev_start,
+        Sale.sale_date <= prev_end,
+        Sale.status == 'completada'
+    ).all()
+    prev_total = sum(s.total for s in prev_sales)
+    if prev_total > 0:
+        growth_pct = round(((total_sales - prev_total) / prev_total) * 100, 1)
+    else:
+        growth_pct = 100.0 if total_sales > 0 else 0.0
+
+    # 4. Desglose de métodos de pago en el periodo
+    cash_total = sum(
+        (s.amount_cash if s.payment_method == 'mixto' and s.amount_cash else s.total)
+        for s in sales if s.payment_method in ('efectivo', 'mixto')
+    )
+    transfer_total = sum(
+        (s.amount_transfer if s.payment_method == 'mixto' and s.amount_transfer else s.total)
+        for s in sales if s.payment_method in ('transferencia', 'mixto')
+    )
+    card_total = sum(
+        (s.amount_card if s.payment_method == 'mixto' and s.amount_card else s.total)
+        for s in sales if s.payment_method in ('tarjeta', 'mixto')
+    )
+    credit_total = sum(s.total for s in sales if s.payment_method == 'fiado')
+
+    payment_breakdown = {
+        'efectivo': {'amount': cash_total, 'pct': round((cash_total / total_sales * 100), 1) if total_sales > 0 else 0},
+        'transferencia': {'amount': transfer_total, 'pct': round((transfer_total / total_sales * 100), 1) if total_sales > 0 else 0},
+        'tarjeta': {'amount': card_total, 'pct': round((card_total / total_sales * 100), 1) if total_sales > 0 else 0},
+        'fiado': {'amount': credit_total, 'pct': round((credit_total / total_sales * 100), 1) if total_sales > 0 else 0},
+    }
+
+    # 5. Serie temporal para gráfica de tendencia (últimos días)
+    trend_data = []
+    days_back = 7 if period in ('today', 'week') else 14
+    day_names_es = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom']
+    for i in range(days_back - 1, -1, -1):
+        day_date = (now - timedelta(days=i)).date()
+        d_start = datetime.combine(day_date, datetime.min.time())
+        d_end = datetime.combine(day_date, datetime.max.time())
+        d_sales = Sale.query.filter(
+            Sale.store_id == store_id,
+            Sale.sale_date >= d_start,
+            Sale.sale_date <= d_end,
+            Sale.status == 'completada'
+        ).all()
+        trend_data.append({
+            'date_str': day_date.strftime('%d/%m'),
+            'day_name': day_names_es[day_date.weekday()],
+            'total': sum(s.total for s in d_sales),
+            'count': len(d_sales)
+        })
+
+    # 6. Top 5 Productos estrella (más vendidos en el periodo)
+    top_products_query = db.session.query(
+        Product.id,
+        Product.name,
+        Category.name.label('cat_name'),
+        Product.price,
+        Product.stock,
+        func.sum(SaleItem.quantity).label('qty_sold'),
+        func.sum(SaleItem.subtotal).label('revenue')
+    ).join(SaleItem, SaleItem.product_id == Product.id)\
+     .join(Sale, Sale.id == SaleItem.sale_id)\
+     .outerjoin(Category, Category.id == Product.category_id)\
+     .filter(
+         Product.store_id == store_id,
+         Sale.sale_date >= start_date,
+         Sale.sale_date <= end_date,
+         Sale.status == 'completada'
+     ).group_by(Product.id)\
+     .order_by(desc('qty_sold'))\
+     .limit(5).all()
+
+    top_products = [
+        {
+            'id': p.id,
+            'name': p.name,
+            'category': p.cat_name or 'General',
+            'price': p.price,
+            'stock': p.stock if p.stock is not None else 'N/A',
+            'qty_sold': int(p.qty_sold),
+            'revenue': int(p.revenue)
+        }
+        for p in top_products_query
+    ]
+
+    # 7. Inventario y Alertas de Reposición (Semáforo de Stock)
+    active_products = Product.query.filter_by(store_id=store_id, is_active=True).all()
+    total_active_products = len(active_products)
+    inventory_valuation = sum(
+        (p.stock or 0) * p.price for p in active_products if not p.sell_by_weight and p.stock and p.stock > 0
+    )
+
+    out_of_stock = [
+        p for p in active_products
+        if not p.sell_by_weight and p.stock is not None and p.stock <= 0
+    ][:6]
+
+    low_stock = [
+        p for p in active_products
+        if not p.sell_by_weight and p.stock is not None and 0 < p.stock <= 5
+    ][:6]
+
+    # 8. Estado de Cartera y Fiados
+    credit_clients = CreditClient.query.filter_by(store_id=store_id, is_active=True).all()
+    total_debt = sum(c.total_debt for c in credit_clients)
+    debtors_count = len([c for c in credit_clients if c.total_debt > 0])
+    top_debtors = sorted([c for c in credit_clients if c.total_debt > 0], key=lambda c: c.total_debt, reverse=True)[:5]
+
+    return render_template(
+        'dashboard.html',
+        period=period,
+        period_label=period_label,
+        prev_label=prev_label,
+        total_sales=total_sales,
+        sales_count=sales_count,
+        avg_ticket=avg_ticket,
+        growth_pct=growth_pct,
+        prev_total=prev_total,
+        payment_breakdown=payment_breakdown,
+        trend_data=trend_data,
+        top_products=top_products,
+        total_active_products=total_active_products,
+        inventory_valuation=inventory_valuation,
+        out_of_stock=out_of_stock,
+        low_stock=low_stock,
+        total_debt=total_debt,
+        debtors_count=debtors_count,
+        total_clients=len(credit_clients),
+        top_debtors=top_debtors
+    )
 
 @app.route('/settings/store', methods=['GET', 'POST'])
 @login_required
+@admin_only
 def settings_store():
     """Datos del Supermercado y Personalización Visual."""
     store = get_store_settings()
@@ -562,14 +1927,24 @@ def settings_store():
             img.save(qr_path, quality=90, optimize=True)
             store.qr_transferencia = qr_name
         
-        # Theme visual settings
-        store.theme_color_primary = request.form.get('theme_color_primary', 'default').strip()
-        store.theme_color_accent = request.form.get('theme_color_accent', 'default').strip()
-        store.theme_color_background = request.form.get('theme_color_background', 'default').strip()
+        # Theme visual settings con protección estricta de contraste para texto blanco
+        p_raw = request.form.get('theme_color_primary', 'default').strip()
+        store.theme_color_primary = clamp_color_darkness(p_raw, max_brightness=140)
+        
+        a_raw = request.form.get('theme_color_accent', 'default').strip()
+        store.theme_color_accent = clamp_color_darkness(a_raw, max_brightness=165)
+        
+        bg_raw = request.form.get('theme_color_background', 'default').strip()
+        store.theme_color_background = clamp_color_darkness(bg_raw, max_brightness=45)
+        
         store.theme_font_family = request.form.get('theme_font_family', 'default').strip()
         store.theme_font_size = request.form.get('theme_font_size', 'default').strip()
-        store.theme_btn_clear_color = request.form.get('theme_btn_clear_color', 'default').strip()
-        store.theme_btn_charge_color = request.form.get('theme_btn_charge_color', 'default').strip()
+        
+        clear_raw = request.form.get('theme_btn_clear_color', 'default').strip()
+        store.theme_btn_clear_color = clamp_color_darkness(clear_raw, max_brightness=140)
+        
+        charge_raw = request.form.get('theme_btn_charge_color', 'default').strip()
+        store.theme_btn_charge_color = clamp_color_darkness(charge_raw, max_brightness=140)
         
         db.session.commit()
         log_audit('STORE_SETTINGS_UPDATE', f'Configuración del supermercado actualizada: {store.store_name}', current_user.id)
@@ -577,6 +1952,52 @@ def settings_store():
         return redirect(url_for('settings_store'))
     
     return render_template('configuracion.html', store=store)
+
+
+@app.route('/settings/hardware', methods=['GET', 'POST'])
+@login_required
+def settings_hardware():
+    """Hardware configuration (scale mode, etc.)."""
+    settings = get_store_settings()
+    
+    if request.method == 'POST':
+        settings.scale_mode = request.form.get('scale_mode', 'manual')
+        if settings.scale_mode not in ('manual', 'auto'):
+            settings.scale_mode = 'manual'
+        db.session.commit()
+        flash('Configuración de hardware guardada.', 'success')
+        return redirect(url_for('settings_hardware'))
+    
+    return render_template('hardware_config.html', settings=settings)
+
+
+@app.route('/api/settings/printer', methods=['GET', 'POST'])
+@login_required
+def api_printer_settings():
+    """Save/load printer config from database (persistent across updates)."""
+    settings = get_store_settings()
+    
+    if request.method == 'POST':
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'message': 'Datos inválidos.'}), 400
+        
+        if 'printer_name' in data:
+            settings.printer_name = data['printer_name'] or ''
+        if 'auto_print' in data:
+            settings.auto_print = bool(data['auto_print'])
+        if 'auto_drawer' in data:
+            settings.auto_drawer = bool(data['auto_drawer'])
+        
+        db.session.commit()
+        return jsonify({'success': True, 'message': 'Configuración de impresora guardada.'})
+    
+    return jsonify({
+        'success': True,
+        'printer_name': settings.printer_name or '',
+        'auto_print': settings.auto_print if settings.auto_print is not None else True,
+        'auto_drawer': settings.auto_drawer if settings.auto_drawer is not None else True
+    })
 
 
 # ============================================================
@@ -593,7 +2014,10 @@ def products():
     search = request.args.get('search', '').strip()
     category_filter = request.args.get('category', '')
     
-    query = Product.query.filter_by(store_id=current_user.store_id)
+    query = Product.query.filter(
+        Product.store_id == current_user.store_id,
+        db.or_(Product.barcode == None, Product.barcode != '__CUSTOM__')
+    )
     
     if search:
         query = query.filter(
@@ -611,6 +2035,185 @@ def products():
     
     return render_template('productos.html', products=products_list, categories=categories,
                            search=search, category_filter=category_filter)
+
+
+def generate_unique_store_barcode(store_id):
+    """
+    Genera un código de barras interno compatible EAN-13 (prefijo 20 + 10 dígitos + dígito de control).
+    El prefijo 20 está reservado por el estándar GS1 para uso restringido interno en supermercados/tiendas.
+    """
+    for _ in range(100):
+        mid = f"{random.randint(1000000000, 9999999999)}"
+        base12 = f"20{mid}"
+        digits = [int(c) for c in base12]
+        s1 = sum(digits[0::2])
+        s2 = sum(digits[1::2]) * 3
+        check_digit = (10 - ((s1 + s2) % 10)) % 10
+        candidate = f"{base12}{check_digit}"
+        
+        if not Product.query.filter_by(store_id=store_id, barcode=candidate).first():
+            return candidate
+            
+    ts = int(datetime.now().timestamp() * 1000)
+    return f"20{str(ts)[-10:]}"
+
+
+def print_barcode_job(printer_name, barcode, product_name, price, store_name, copies=1):
+    """Envía comandos ESC/POS para imprimir etiquetas de código de barras a la impresora térmica."""
+    if not HW_AVAILABLE or not printer_name:
+        return False, "Hardware nativo no disponible o impresora no especificada"
+    try:
+        ESC = b'\x1b'
+        GS = b'\x1d'
+        INIT = ESC + b'@'
+        ALIGN_CENTER = ESC + b'a\x01'
+        ALIGN_LEFT = ESC + b'a\x00'
+        BOLD_ON = ESC + b'E\x01'
+        BOLD_OFF = ESC + b'E\x00'
+        CUT = GS + b'V\x42\x00'
+        
+        label_cmds = []
+        label_cmds.append(INIT)
+        label_cmds.append(ALIGN_CENTER)
+        
+        # Nombre de la tienda
+        clean_store = unidecode.unidecode(store_name[:26]) if store_name else 'MERCAPP'
+        label_cmds.append(BOLD_ON + clean_store.encode('ascii', errors='replace') + b'\n' + BOLD_OFF)
+        
+        # Nombre del producto
+        clean_prod = unidecode.unidecode(product_name[:30])
+        label_cmds.append(BOLD_ON + clean_prod.encode('ascii', errors='replace') + b'\n' + BOLD_OFF)
+        
+        # Precio
+        if price:
+            try:
+                p_val = int(price)
+                price_str = f"${p_val:,.0f} COP".replace(',', '.')
+                label_cmds.append(BOLD_ON + price_str.encode('ascii') + b'\n' + BOLD_OFF)
+            except Exception:
+                pass
+                
+        # Configuración de código de barras en ESC/POS
+        label_cmds.append(GS + b'h' + bytes([70]))  # Altura: 70 dots
+        label_cmds.append(GS + b'w' + bytes([2]))   # Ancho de barra: 2
+        label_cmds.append(GS + b'H' + bytes([2]))   # HRI abajo del código: 2
+        label_cmds.append(GS + b'f' + bytes([0]))   # Fuente HRI estándar 0
+        
+        # Code 128 (GS k 73 len b'{B' + barcode)
+        clean_code = unidecode.unidecode(str(barcode).strip())
+        code_bytes = b'{B' + clean_code.encode('ascii', errors='replace')
+        label_cmds.append(GS + b'k' + bytes([73, len(code_bytes)]) + code_bytes)
+        
+        # Avance y corte
+        label_cmds.append(b'\n\n\n')
+        label_cmds.append(CUT)
+        
+        single_label = b''.join(label_cmds)
+        full_payload = single_label * max(1, min(int(copies or 1), 20))
+        
+        import threading
+        def _send():
+            try:
+                hPrinter = win32print.OpenPrinter(printer_name)
+                try:
+                    win32print.StartDocPrinter(hPrinter, 1, ("EtiquetaCodigo", None, "RAW"))
+                    try:
+                        win32print.StartPagePrinter(hPrinter)
+                        win32print.WritePrinter(hPrinter, full_payload)
+                        win32print.EndPagePrinter(hPrinter)
+                    finally:
+                        win32print.EndDocPrinter(hPrinter)
+                finally:
+                    win32print.ClosePrinter(hPrinter)
+            except Exception as ex:
+                app.logger.error(f"Error imprimiendo etiqueta de código de barras: {ex}")
+                
+        threading.Thread(target=_send, daemon=True).start()
+        return True, "Enviado a imprimir"
+    except Exception as e:
+        return False, str(e)
+
+
+@app.route('/api/products/generate-barcode', methods=['GET'])
+@login_required
+def api_products_generate_barcode():
+    code = generate_unique_store_barcode(current_user.store_id)
+    return jsonify({'success': True, 'barcode': code})
+
+
+@app.route('/api/products/check-barcode', methods=['GET'])
+@login_required
+def api_products_check_barcode():
+    barcode = request.args.get('barcode', '').strip()
+    product_id = request.args.get('product_id', type=int)
+    
+    if not barcode:
+        return jsonify({'success': False, 'message': 'Código vacío'}), 400
+        
+    query = Product.query.filter_by(store_id=current_user.store_id, barcode=barcode)
+    if product_id:
+        query = query.filter(Product.id != product_id)
+        
+    existing = query.first()
+    if existing:
+        return jsonify({
+            'success': True,
+            'available': False,
+            'existing_product': {
+                'id': existing.id,
+                'name': existing.name,
+                'price': existing.price,
+                'barcode': existing.barcode
+            }
+        })
+    return jsonify({'success': True, 'available': True})
+
+
+@app.route('/products/barcode-label')
+@login_required
+def product_barcode_label():
+    barcode = request.args.get('barcode', '').strip()
+    name = request.args.get('name', 'Producto').strip()
+    price = request.args.get('price', '0').strip()
+    copies = request.args.get('copies', 1, type=int)
+    copies = max(1, min(copies, 50))
+    settings = get_store_settings()
+    return render_template('etiqueta_codigo.html',
+                           barcode=barcode,
+                           name=name,
+                           price=price,
+                           copies=copies,
+                           settings=settings)
+
+
+@app.route('/api/hardware/print-barcode', methods=['POST'])
+@login_required
+def api_hardware_print_barcode():
+    data = request.get_json() or {}
+    barcode = data.get('barcode', '').strip()
+    product_name = data.get('product_name', 'Producto').strip()
+    price = data.get('price', 0)
+    copies = int(data.get('copies', 1))
+    printer_name = data.get('printer_name')
+    
+    if not barcode:
+        return jsonify({'success': False, 'message': 'Código de barras no especificado'}), 400
+        
+    settings = get_store_settings()
+    store_name = settings.store_name if settings and settings.store_name else 'MERCAPP'
+    
+    if not HW_AVAILABLE or not printer_name:
+        return jsonify({
+            'success': False,
+            'browser_fallback': True,
+            'message': 'Impresora nativa no disponible. Usa la opción de navegador.'
+        })
+        
+    success, msg = print_barcode_job(printer_name, barcode, product_name, price, store_name, copies)
+    if success:
+        return jsonify({'success': True, 'message': 'Etiqueta enviada a la impresora.'})
+    else:
+        return jsonify({'success': False, 'message': msg}), 500
 
 
 @app.route('/products/add', methods=['GET', 'POST'])
@@ -692,7 +2295,20 @@ def product_add():
             db.session.add(product)
             db.session.commit()
             log_audit('PRODUCT_CREATE', f'Producto creado: "{name}" (ID:{product.id}) - Precio: ${price_int:,} COP', current_user.id)
-            flash(f'Producto "{name}" agregado exitosamente.', 'success')
+            
+            auto_print = request.form.get('auto_print_barcode') == '1'
+            printer_name = request.form.get('printer_name', '').strip()
+            if auto_print and barcode:
+                settings = get_store_settings()
+                st_name = settings.store_name if settings and settings.store_name else 'MERCAPP'
+                printed, msg = print_barcode_job(printer_name, barcode, name, price_int, st_name, copies=1)
+                if printed:
+                    flash(f'Producto "{name}" agregado exitosamente y etiqueta con código {barcode} enviada a imprimir en "{printer_name}".', 'success')
+                else:
+                    session['print_barcode_popup'] = {'barcode': barcode, 'name': name, 'price': price_int}
+                    flash(f'Producto "{name}" agregado exitosamente con código de barras {barcode}.', 'success')
+            else:
+                flash(f'Producto "{name}" agregado exitosamente.', 'success')
             return redirect(url_for('products'))
         except Exception as e:
             db.session.rollback()
@@ -790,7 +2406,20 @@ def product_edit(product_id):
             change_str = ', '.join(changes) if changes else 'datos actualizados'
             
             log_audit('PRODUCT_UPDATE', f'Producto editado (ID:{product.id}): {change_str}', current_user.id)
-            flash(f'Producto "{product.name}" actualizado.', 'success')
+            
+            auto_print = request.form.get('auto_print_barcode') == '1'
+            printer_name = request.form.get('printer_name', '').strip()
+            if auto_print and barcode:
+                settings = get_store_settings()
+                st_name = settings.store_name if settings and settings.store_name else 'MERCAPP'
+                printed, msg = print_barcode_job(printer_name, barcode, name, price_int, st_name, copies=1)
+                if printed:
+                    flash(f'Producto "{product.name}" actualizado y etiqueta enviada a imprimir en "{printer_name}".', 'success')
+                else:
+                    session['print_barcode_popup'] = {'barcode': barcode, 'name': name, 'price': price_int}
+                    flash(f'Producto "{product.name}" actualizado con código de barras {barcode}.', 'success')
+            else:
+                flash(f'Producto "{product.name}" actualizado.', 'success')
             return redirect(url_for('products'))
         except Exception as e:
             db.session.rollback()
@@ -823,7 +2452,10 @@ def product_delete(product_id):
 def products_export():
     """Exportar catálogo de productos a archivo CSV compatible con Excel."""
     categories_param = request.args.get('categories', '')
-    query = Product.query.filter_by(store_id=current_user.store_id)
+    query = Product.query.filter(
+        Product.store_id == current_user.store_id,
+        db.or_(Product.barcode == None, Product.barcode != '__CUSTOM__')
+    )
     
     if categories_param:
         try:
@@ -1010,6 +2642,34 @@ def api_bulk_price():
         return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
 
 
+@app.route('/api/cleanup/custom-products', methods=['POST'])
+@login_required
+@admin_only
+def api_cleanup_custom_products():
+    """Eliminar productos personalizados (__CUSTOM__) huérfanos con más de 30 días sin ventas asociadas."""
+    try:
+        cutoff = datetime.now() - timedelta(days=30)
+        old_custom = Product.query.filter(
+            Product.store_id == current_user.store_id,
+            Product.barcode == '__CUSTOM__',
+            Product.created_at < cutoff
+        ).all()
+        
+        deleted = 0
+        for p in old_custom:
+            has_sales = SaleItem.query.filter_by(product_id=p.id).first()
+            if not has_sales:
+                db.session.delete(p)
+                deleted += 1
+                
+        db.session.commit()
+        return jsonify({'success': True, 'deleted': deleted, 'message': f'{deleted} productos temporales eliminados.'})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
+
+
+
 # ============================================================
 # ROUTES — CATEGORY MANAGEMENT
 # ============================================================
@@ -1098,7 +2758,10 @@ def category_delete(category_id):
         flash('Categoría no encontrada.', 'error')
         return redirect(url_for('categories'))
     
-    product_count = Product.query.filter_by(category_id=cat.id).count()
+    product_count = Product.query.filter(
+        Product.category_id == cat.id,
+        db.or_(Product.barcode == None, Product.barcode != '__CUSTOM__')
+    ).count()
     if product_count > 0:
         flash(f'No se puede eliminar "{cat.name}" porque tiene {product_count} productos. Mueve o elimina los productos primero.', 'error')
         return redirect(url_for('categories'))
@@ -1161,7 +2824,7 @@ def api_subcategories(category_id):
 
 
 # ============================================================
-# ROUTES — AUDIT LOG
+# ROUTES — AUDIT LOG (Integrado al Centro de Control / Configuración)
 # ============================================================
 
 @app.route('/audit')
@@ -1202,44 +2865,2063 @@ def user_images(filename):
 
 
 # ============================================================
-# ROUTES — STUBS for features to come in subsequent sprints
+# ROUTES — POS (Punto de Venta / Caja) & SESIONES DE CAJA
 # ============================================================
 
 @app.route('/pos')
 @login_required
 def pos():
-    return redirect(url_for('settings'))
+    # If the session was mistakenly logged in with a cashier user, restore store admin
+    if not current_user.is_admin:
+        admin = User.query.filter_by(store_id=current_user.store_id, is_admin=True).first()
+        if admin:
+            login_user(admin)
+            
+    session.pop('admin_unlocked', None)
+    active_session = get_today_session()
+    if not active_session:
+        return redirect(url_for('session_open'))
+        
+    categories = Category.query.filter_by(store_id=current_user.store_id, visible_in_pos=True).order_by(Category.display_order).all()
+    settings = get_store_settings()
+    return render_template('caja.html', categories=categories, settings=settings, scale_mode=settings.scale_mode if settings else 'manual')
 
-@app.route('/orders')
+
+@app.route('/session/open', methods=['GET', 'POST'])
 @login_required
-def orders():
-    return redirect(url_for('settings'))
+def session_open():
+    active_session = get_today_session()
+    if active_session:
+        return redirect(url_for('pos'))
+        
+    if request.method == 'POST':
+        base_amount = request.form.get('base_amount', '0')
+        try:
+            base = int(base_amount)
+            new_sess = CashSession(
+                store_id=current_user.store_id,
+                user_id=get_effective_user_id(),
+                base_amount=base,
+                expected_cash=base
+            )
+            db.session.add(new_sess)
+            db.session.commit()
+            log_audit('CASH_SESSION_OPEN', f'Caja abierta con base de {format_cop(base)}', current_user.id)
+            return redirect(url_for('pos'))
+        except ValueError:
+            flash('Monto base inválido', 'error')
+            
+    return render_template('caja_apertura.html')
 
-@app.route('/sales-history')
+
+@app.route('/session/close', methods=['GET', 'POST'])
 @login_required
-def sales_history():
-    return redirect(url_for('settings'))
+def session_close():
+    """Cerrar la sesión de hoy o una específica."""
+    session_id = request.args.get('session_id', type=int)
+    if session_id:
+        active_session = db.session.get(CashSession, session_id)
+        if not active_session or active_session.store_id != current_user.store_id:
+            flash('Sesión no encontrada.', 'error')
+            return redirect(url_for('session_history'))
+        if active_session.status == 'cerrada':
+            flash('Esa sesión ya está cerrada.', 'error')
+            return redirect(url_for('session_history'))
+    else:
+        active_session = get_today_session()
+        if not active_session:
+            active_session = CashSession.query.filter_by(
+                store_id=current_user.store_id, status='abierta'
+            ).order_by(CashSession.opened_at.desc()).first()
+        if not active_session:
+            flash('No hay sesiones abiertas.', 'error')
+            return redirect(url_for('pos'))
+        
+    sales_in_session = Sale.query.filter_by(cash_session_id=active_session.id, status='completada').all()
+    cash = sum(s.amount_cash or 0 for s in sales_in_session)
+    card = sum(s.amount_card or 0 for s in sales_in_session)
+    transfer = sum(s.amount_transfer or 0 for s in sales_in_session)
+    expected_cash = active_session.base_amount + cash
+    
+    if request.method == 'POST':
+        actual = request.form.get('actual_cash', '0')
+        try:
+            actual = int(actual)
+            active_session.cash_sales = cash
+            active_session.card_sales = card
+            active_session.transfer_sales = transfer
+            active_session.expected_cash = expected_cash
+            active_session.actual_cash = actual
+            active_session.status = 'cerrada'
+            active_session.closed_at = datetime.now()
+            db.session.commit()
+            diff = actual - expected_cash
+            diff_text = f"+{format_cop(diff)}" if diff >= 0 else f"-{format_cop(abs(diff))}"
+            log_audit('CASH_SESSION_CLOSE', f'Caja cerrada. Recuento: {format_cop(actual)}, Esperado: {format_cop(expected_cash)}, Diferencia: {diff_text}', current_user.id)
+            flash(f'Caja cerrada exitosamente. Diferencia: {diff_text}', 'success')
+            return redirect(url_for('session_history'))
+        except ValueError:
+            flash('Monto de recuento inválido', 'error')
+            
+    return render_template('caja_cierre.html', expected_cash=expected_cash, base=active_session.base_amount, cash_sales=cash, card=card, transfer=transfer, active_session=active_session)
 
+
+@app.route('/session/history')
+@app.route('/session-history')
 @app.route('/sessions')
 @login_required
+@admin_only
 def session_history():
-    return redirect(url_for('settings'))
+    sessions = CashSession.query.filter_by(store_id=current_user.store_id).order_by(CashSession.opened_at.desc()).all()
+    return render_template('caja_historial.html', sessions=sessions)
 
-@app.route('/debts')
+
+@app.route('/session/<int:session_id>')
 @login_required
-def debts():
-    return redirect(url_for('settings'))
+@admin_only
+def session_detail(session_id):
+    session_obj = db.session.get(CashSession, session_id)
+    if not session_obj or session_obj.store_id != current_user.store_id:
+        flash('Sesión no encontrada.', 'error')
+        return redirect(url_for('session_history'))
+    
+    # Sales for this specific session
+    sales = Sale.query.filter_by(cash_session_id=session_id).order_by(Sale.sale_date.desc()).all()
+    
+    # Calculate real-time totals from actual sales
+    completed_sales = [s for s in sales if s.status == 'completada']
+    cash_total = sum(
+        (s.amount_cash if s.payment_method == 'mixto' and s.amount_cash else s.total)
+        for s in completed_sales if s.payment_method in ('efectivo', 'mixto')
+    )
+    transfer_total = sum(
+        (s.amount_transfer if s.payment_method == 'mixto' and s.amount_transfer else s.total)
+        for s in completed_sales if s.payment_method in ('transferencia', 'mixto')
+    )
+    card_total = sum(
+        (s.amount_card if s.payment_method == 'mixto' and s.amount_card else s.total)
+        for s in completed_sales if s.payment_method in ('tarjeta', 'mixto')
+    )
+    expected_cash = (session_obj.base_amount or 0) + cash_total
+    
+    return render_template('caja_detalle.html', session_obj=session_obj, session=session_obj, sales=sales,
+                           cash_total=cash_total, transfer_total=transfer_total,
+                           card_total=card_total, expected_cash_live=expected_cash)
+
+
+# ============================================================
+# ROUTES — HISTORIAL DE VENTAS Y FACTURACIÓN
+# ============================================================
+
+@app.route('/sales')
+@app.route('/sales-history')
+@login_required
+@admin_only
+def sales_history():
+    page = request.args.get('page', 1, type=int)
+    date_from = request.args.get('date_from', '')
+    date_to = request.args.get('date_to', '')
+    method_filter = request.args.get('method', '')
+    
+    query = Sale.query.filter_by(store_id=current_user.store_id)
+    
+    if date_from:
+        try:
+            df = datetime.strptime(date_from, '%Y-%m-%d')
+            query = query.filter(Sale.sale_date >= df)
+        except ValueError:
+            pass
+    
+    if date_to:
+        try:
+            dt = datetime.strptime(date_to, '%Y-%m-%d')
+            dt = dt.replace(hour=23, minute=59, second=59)
+            query = query.filter(Sale.sale_date <= dt)
+        except ValueError:
+            pass
+    
+    if method_filter:
+        query = query.filter_by(payment_method=method_filter)
+        
+    all_filtered = query.all()
+    total_ventas = sum(s.total for s in all_filtered if s.status == 'completada')
+    count_ventas = sum(1 for s in all_filtered if s.status == 'completada')
+    count_anuladas = sum(1 for s in all_filtered if s.status == 'anulada')
+    
+    sales = query.order_by(Sale.sale_date.desc()).paginate(page=page, per_page=20, error_out=False)
+    
+    return render_template('historial_ventas.html', sales=sales,
+                           total_ventas=total_ventas, count_ventas=count_ventas,
+                           count_anuladas=count_anuladas,
+                           date_from=date_from, date_to=date_to, method_filter=method_filter)
+
+
+@app.route('/sales/<int:sale_id>')
+@login_required
+@admin_only
+def sale_detail(sale_id):
+    sale = db.session.get(Sale, sale_id)
+    if not sale or sale.store_id != current_user.store_id:
+        flash('Venta no encontrada.', 'error')
+        return redirect(url_for('sales_history'))
+    settings = get_store_settings()
+    return render_template('detalle_venta.html', sale=sale, settings=settings)
+
+
+@app.route('/sales/<int:sale_id>/receipt')
+@login_required
+def sale_receipt(sale_id):
+    sale = db.session.get(Sale, sale_id)
+    if not sale or sale.store_id != current_user.store_id:
+        flash('Venta no encontrada.', 'error')
+        return redirect(url_for('sales_history'))
+    ghost = request.args.get('ghost', '0') == '1'
+    settings = get_store_settings()
+    return render_template('factura.html', sale=sale, settings=settings, ghost=ghost)
+
+
+@app.route('/sales/export')
+@login_required
+@admin_only
+def sales_export():
+    """Exportar historial de ventas en formato CSV."""
+    date_from = request.args.get('date_from', '')
+    date_to = request.args.get('date_to', '')
+    
+    query = Sale.query.filter_by(store_id=current_user.store_id, status='completada')
+    if date_from:
+        try:
+            df = datetime.strptime(date_from, '%Y-%m-%d')
+            query = query.filter(Sale.sale_date >= df)
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            dt = datetime.strptime(date_to, '%Y-%m-%d')
+            dt = dt.replace(hour=23, minute=59, second=59)
+            query = query.filter(Sale.sale_date <= dt)
+        except ValueError:
+            pass
+            
+    sales = query.order_by(Sale.sale_date.desc()).all()
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['Factura', 'Fecha', 'Metodo', 'Subtotal', 'Total', 'Efectivo', 'Tarjeta', 'Transferencia', 'Referencia'])
+    for s in sales:
+        writer.writerow([
+            s.receipt_number,
+            s.sale_date.strftime('%Y-%m-%d %H:%M:%S'),
+            s.payment_method,
+            s.subtotal,
+            s.total,
+            s.amount_cash or 0,
+            s.amount_card or 0,
+            s.amount_transfer or 0,
+            s.payment_ref or ''
+        ])
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype='text/csv',
+        headers={'Content-Disposition': f'attachment; filename=ventas_{datetime.now().strftime("%Y%m%d")}.csv'}
+    )
+
+
+# ============================================================
+# API POS — BÚSQUEDA Y PROCESAMIENTO DE VENTAS
+# ============================================================
+
+@app.route('/api/product/smart-search')
+@login_required
+def api_smart_search():
+    """Búsqueda inteligente: detecta código de barras vs nombre."""
+    query = request.args.get('q', '').strip()
+    if len(query) < 2:
+        return jsonify({'success': False, 'message': 'Ingresa al menos 2 caracteres.'}), 400
+    
+    is_barcode = bool(re.match(r'^\d{4,}$', query))
+    
+    def serialize_product(p):
+        return {
+            'id': p.id,
+            'name': p.name,
+            'price': p.price,
+            'price_formatted': format_cop(p.price),
+            'barcode': p.barcode,
+            'image': p.image,
+            'stock': p.stock,
+            'category': p.category.name if p.category else '',
+            'sell_by_weight': p.sell_by_weight,
+            'weight_unit': p.weight_unit
+        }
+    
+    # Prioridad: Coincidencia exacta de código de barras (numérico o alfanumérico)
+    exact_product = Product.query.filter_by(
+        store_id=current_user.store_id, barcode=query, is_active=True
+    ).first()
+    if exact_product:
+        return jsonify({
+            'success': True,
+            'mode': 'barcode',
+            'product': serialize_product(exact_product),
+            'products': [serialize_product(exact_product)]
+        })
+
+    if is_barcode:
+        partial = Product.query.filter(
+            Product.store_id == current_user.store_id,
+            Product.barcode.ilike(f'%{query}%'),
+            Product.is_active == True
+        ).limit(10).all()
+        if partial:
+            return jsonify({
+                'success': True,
+                'mode': 'barcode_partial',
+                'products': [serialize_product(p) for p in partial]
+            })
+        return jsonify({
+            'success': False,
+            'mode': 'barcode',
+            'message': f'No se encontró producto con código de barras "{query}".'
+        }), 404
+    else:
+        query_lower = query.lower()
+        query_words = query_lower.split()
+        all_products = Product.query.filter(
+            Product.store_id == current_user.store_id,
+            Product.is_active == True,
+            db.or_(Product.barcode == None, Product.barcode != '__CUSTOM__')
+        ).all()
+        
+        scored = []
+        for p in all_products:
+            name_lower = p.name.lower()
+            score = 0
+            if name_lower == query_lower:
+                score = 1000
+            elif name_lower.startswith(query_lower):
+                score = 500
+            elif query_lower in name_lower:
+                score = 300
+            else:
+                matched_words = sum(1 for w in query_words if w in name_lower)
+                if matched_words > 0:
+                    score = 100 * matched_words
+                else:
+                    product_words = name_lower.split()
+                    for qw in query_words:
+                        for pw in product_words:
+                            ratio = difflib.SequenceMatcher(None, qw, pw).ratio()
+                            if ratio >= 0.65:
+                                score = max(score, int(ratio * 80))
+            if score > 0:
+                score += max(0, 50 - len(p.name))
+                score += min((p.sale_count or 0), 30)
+                scored.append((score, p))
+                
+        scored.sort(key=lambda x: -x[0])
+        final_matches = [p for _, p in scored[:15]]
+        return jsonify({
+            'success': True,
+            'mode': 'name',
+            'products': [serialize_product(p) for p in final_matches]
+        })
+
+
+@app.route('/api/product/scan/<barcode>')
+@login_required
+def api_scan_product(barcode):
+    """Buscar producto por código de barras."""
+    product = Product.query.filter_by(store_id=current_user.store_id, barcode=barcode, is_active=True).first()
+    if not product:
+        return jsonify({'success': False, 'message': 'Producto no encontrado con ese código de barras.'}), 404
+    return jsonify({
+        'success': True,
+        'product': {
+            'id': product.id,
+            'name': product.name,
+            'price': product.price,
+            'price_formatted': format_cop(product.price),
+            'barcode': product.barcode,
+            'image': product.image,
+            'stock': product.stock,
+            'category': product.category.name if product.category else '',
+            'sell_by_weight': product.sell_by_weight,
+            'weight_unit': product.weight_unit
+        }
+    })
+
+
+@app.route('/api/product/search')
+@login_required
+def api_search_product():
+    """Búsqueda simple de productos por nombre."""
+    query = request.args.get('q', '').strip()
+    if len(query) < 2:
+        return jsonify({'success': False, 'message': 'Ingresa al menos 2 caracteres.'}), 400
+    products = Product.query.filter(
+        Product.store_id == current_user.store_id,
+        Product.name.ilike(f'%{query}%'),
+        Product.is_active == True
+    ).limit(20).all()
+    return jsonify({
+        'success': True,
+        'products': [{
+            'id': p.id,
+            'name': p.name,
+            'price': p.price,
+            'price_formatted': format_cop(p.price),
+            'barcode': p.barcode,
+            'image': p.image,
+            'stock': p.stock,
+            'category': p.category.name if p.category else '',
+            'sell_by_weight': p.sell_by_weight,
+            'weight_unit': p.weight_unit
+        } for p in products]
+    })
+
+
+@app.route('/api/product/plu')
+@login_required
+def api_plu_search():
+    """Buscar producto por código PLU."""
+    plu_code = request.args.get('code', '').strip()
+    if not plu_code:
+        return jsonify({'success': False, 'message': 'Código PLU no proporcionado.'}), 400
+    product = Product.query.filter_by(
+        store_id=current_user.store_id, plu_code=plu_code, is_active=True
+    ).first()
+    if product:
+        return jsonify({
+            'success': True,
+            'product': {
+                'id': product.id,
+                'name': product.name,
+                'price': product.price,
+                'price_formatted': format_cop(product.price),
+                'barcode': product.barcode,
+                'image': product.image,
+                'stock': product.stock,
+                'sell_by_weight': product.sell_by_weight,
+                'weight_unit': product.weight_unit,
+                'plu_code': product.plu_code
+            }
+        })
+    return jsonify({'success': False, 'message': f'No se encontró producto con código PLU "{plu_code}".'}), 404
+
+
+@app.route('/api/category/<int:category_id>/products')
+@login_required
+def api_category_products(category_id):
+    """Productos por categoría para la rejilla táctil de la caja."""
+    products = Product.query.filter_by(
+        store_id=current_user.store_id, category_id=category_id, is_active=True
+    ).order_by(
+        db.case(
+            (db.and_(Product.plu_code.isnot(None), Product.plu_code != ''), 2),
+            (db.or_(Product.barcode.is_(None), Product.barcode == ''), 0),
+            else_=1
+        ),
+        Product.name
+    ).all()
+    return jsonify({
+        'success': True,
+        'products': [{
+            'id': p.id,
+            'name': p.name,
+            'price': p.price,
+            'price_formatted': format_cop(p.price),
+            'barcode': p.barcode,
+            'image': p.image,
+            'stock': p.stock,
+            'has_barcode': p.has_barcode,
+            'sell_by_weight': p.sell_by_weight,
+            'weight_unit': p.weight_unit
+        } for p in products]
+    })
+
+
+@app.route('/api/sale', methods=['POST'])
+@login_required
+def api_process_sale():
+    """Procesar y guardar una venta completa."""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'message': 'Datos inválidos.'}), 400
+        
+        items = data.get('items', [])
+        payment = data.get('payment', {})
+        if not items:
+            return jsonify({'success': False, 'message': 'El carrito está vacío.'}), 400
+        
+        sale_items = []
+        total = 0
+        
+        for item in items:
+            if item.get('is_custom'):
+                custom_name = item.get('custom_name', 'Varios').strip() or 'Varios'
+                custom_price = int(item.get('custom_price', 0))
+                if custom_price <= 0:
+                    return jsonify({'success': False, 'message': 'Precio inválido para producto personalizado.'}), 400
+                product = Product.query.filter_by(
+                    store_id=current_user.store_id,
+                    barcode='__CUSTOM__'
+                ).first()
+                if not product:
+                    fallback_cat = Category.query.filter_by(store_id=current_user.store_id).first()
+                    product = Product(
+                        store_id=current_user.store_id,
+                        name='Varios',
+                        price=0,
+                        category_id=fallback_cat.id if fallback_cat else None,
+                        is_active=False,
+                        barcode='__CUSTOM__'
+                    )
+                    db.session.add(product)
+                    db.session.flush()
+            else:
+                product = db.session.get(Product, item.get('product_id'))
+                if not product or product.store_id != current_user.store_id or not product.is_active:
+                    return jsonify({'success': False, 'message': 'Producto no encontrado o inactivo.'}), 400
+            
+            if getattr(product, 'sell_by_weight', False) and not item.get('is_custom'):
+                weight_grams = item.get('weight_grams', 0)
+                if not isinstance(weight_grams, int) or weight_grams < 10:
+                    return jsonify({'success': False, 'message': f'Peso inválido para {product.name}.'}), 400
+                if weight_grams > 50000:
+                    return jsonify({'success': False, 'message': f'El peso máximo para "{product.name}" es 50 kg.'}), 400
+                if product.weight_unit == 'lb':
+                    subtotal = round_to_50(product.price * (weight_grams / 500.0))
+                else:
+                    subtotal = round_to_50(product.price * (weight_grams / 1000.0))
+                total += subtotal
+                sale_items.append({
+                    'product': product,
+                    'quantity': 1,
+                    'unit_price': product.price,
+                    'subtotal': subtotal,
+                    'weight_grams': weight_grams,
+                    'weight_unit': product.weight_unit
+                })
+            else:
+                quantity = item.get('quantity', 0)
+                if not isinstance(quantity, int) or quantity < 1:
+                    return jsonify({'success': False, 'message': f'Cantidad inválida para {product.name}.'}), 400
+                if not item.get('is_custom') and not product.sell_by_weight and product.stock is not None:
+                    if product.stock <= 0:
+                        return jsonify({'success': False, 'message': f'El producto "{product.name}" está agotado.'}), 400
+                    if quantity > product.stock:
+                        return jsonify({'success': False, 'message': f'Stock insuficiente para "{product.name}". Disponible: {product.stock}'}), 400
+                
+                unit_price = custom_price if item.get('is_custom') else product.price
+                subtotal = unit_price * quantity
+                total += subtotal
+                sale_items.append({
+                    'product': product,
+                    'quantity': quantity,
+                    'unit_price': unit_price,
+                    'subtotal': subtotal,
+                    'weight_grams': None,
+                    'weight_unit': None,
+                    'is_custom': item.get('is_custom', False)
+                })
+        
+        if total <= 0:
+            return jsonify({'success': False, 'message': 'El total de la venta no puede ser $0.'}), 400
+        
+        payment_method = payment.get('method', '')
+        pay_errors, pay_data = validate_payment(
+            payment_method=payment_method,
+            total=total,
+            amount_received=payment.get('amount_received'),
+            card_last4=payment.get('card_last4'),
+            card_approval=payment.get('card_approval'),
+            transfer_bank=payment.get('transfer_bank'),
+            transfer_ref=payment.get('transfer_ref'),
+            transfer_name=payment.get('transfer_name'),
+            amount_cash=payment.get('amount_cash'),
+            amount_card=payment.get('amount_card'),
+            amount_transfer=payment.get('amount_transfer')
+        )
+        if pay_errors:
+            return jsonify({'success': False, 'message': ' | '.join(pay_errors)}), 400
+        
+        active_session = get_today_session()
+        if not active_session:
+            return jsonify({'success': False, 'message': 'No hay una base de caja para hoy. Abre caja primero.'}), 400
+
+        receipt_number = generate_receipt_number()
+        sale = Sale(
+            store_id=current_user.store_id,
+            cash_session_id=active_session.id,
+            receipt_number=receipt_number,
+            user_id=get_effective_user_id(),
+            subtotal=total,
+            total=total,
+            payment_method=pay_data['payment_method'],
+            amount_received=pay_data.get('amount_received', total),
+            change_given=pay_data.get('change_given', 0),
+            payment_ref=pay_data.get('payment_ref'),
+            amount_cash=pay_data.get('amount_cash', 0),
+            amount_card=pay_data.get('amount_card', 0),
+            amount_transfer=pay_data.get('amount_transfer', 0),
+            status='completada'
+        )
+        db.session.add(sale)
+        db.session.flush()
+        
+        for si in sale_items:
+            sale_item = SaleItem(
+                sale_id=sale.id,
+                product_id=si['product'].id,
+                quantity=si['quantity'],
+                unit_price=si['unit_price'],
+                subtotal=si['subtotal'],
+                weight_grams=si.get('weight_grams'),
+                weight_unit=si.get('weight_unit')
+            )
+            db.session.add(sale_item)
+            if not si.get('is_custom'):
+                prod = si['product']
+                if not prod.sell_by_weight and prod.stock is not None:
+                    # Descuento atómico de stock (evita race conditions y sobreventa entre múltiples usuarios simultáneos)
+                    res = db.session.execute(
+                        text("UPDATE producto SET stock = stock - :qty, sale_count = COALESCE(sale_count, 0) + :qty WHERE id = :pid AND stock >= :qty"),
+                        {'qty': si['quantity'], 'pid': prod.id}
+                    )
+                    if res.rowcount == 0:
+                        db.session.rollback()
+                        return jsonify({
+                            'success': False,
+                            'message': f'Stock insuficiente para "{prod.name}". Se agotó durante la transacción simultánea.'
+                        }), 400
+                else:
+                    db.session.execute(
+                        text("UPDATE producto SET sale_count = COALESCE(sale_count, 0) + :qty WHERE id = :pid"),
+                        {'qty': si['quantity'], 'pid': prod.id}
+                    )
+                    
+        # Link order if provided
+        order_id = pay_data.get('order_id') or (request.get_json() or {}).get('order_id')
+        if order_id:
+            order = db.session.get(Order, order_id)
+            if order and order.store_id == current_user.store_id:
+                order.sale_id = sale.id
+                order.status = 'completado'
+
+        # Commit seguro tolerante a alta concurrencia con reintento ante colisión de recibo
+        for attempt in range(5):
+            try:
+                db.session.commit()
+                break
+            except Exception as commit_err:
+                db.session.rollback()
+                err_str = str(commit_err).lower()
+                if attempt < 4 and ("unique" in err_str or "receipt_number" in err_str or "locked" in err_str or "busy" in err_str):
+                    time.sleep(0.015 * (attempt + 1))
+                    sale.receipt_number = generate_receipt_number(store_id=sale.store_id)
+                    db.session.add(sale)
+                    for si in sale_items:
+                        db.session.add(SaleItem(
+                            sale_id=sale.id,
+                            product_id=si['product'].id,
+                            quantity=si['quantity'],
+                            unit_price=si['unit_price'],
+                            subtotal=si['subtotal'],
+                            weight_grams=si.get('weight_grams'),
+                            weight_unit=si.get('weight_unit')
+                        ))
+                else:
+                    raise commit_err
+        log_audit('SALE_COMPLETED', f'Venta {sale.receipt_number} realizada por {format_cop(sale.total)} ({sale.payment_method})', current_user.id)
+        
+        return jsonify({
+            'success': True,
+            'message': '¡Venta procesada exitosamente!',
+            'sale': {
+                'id': sale.id,
+                'receipt_number': sale.receipt_number,
+                'total': sale.total,
+                'total_formatted': format_cop(sale.total),
+                'change': sale.change_given,
+                'change_formatted': format_cop(sale.change_given),
+                'payment_method': sale.payment_method
+            }
+        })
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'Error al procesar la venta: {str(e)}'}), 500
+
+
+@app.route('/api/sale/<int:sale_id>/void', methods=['POST'])
+@login_required
+def api_void_sale(sale_id):
+    """Anular una venta."""
+    data = request.get_json() or {}
+    password = data.get('password', '')
+    if not current_user.check_password(password):
+        return jsonify({'success': False, 'message': 'Contraseña incorrecta.'}), 403
+    sale = db.session.get(Sale, sale_id)
+    if not sale or sale.store_id != current_user.store_id:
+        return jsonify({'success': False, 'message': 'Venta no encontrada.'}), 404
+    if sale.status == 'anulada':
+        return jsonify({'success': False, 'message': 'Esta venta ya fue anulada.'}), 400
+    sale.status = 'anulada'
+    db.session.commit()
+    log_audit('SALE_VOIDED', f'Venta {sale.receipt_number} anulada', current_user.id, 'WARNING')
+    return jsonify({'success': True, 'message': f'Venta {sale.receipt_number} anulada exitosamente.'})
+
+
+@app.route('/api/credit-sale', methods=['POST'])
+@login_required
+def api_credit_sale():
+    """Process a sale on credit (fiado) for a specific client."""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'success': False, 'message': 'Datos inválidos.'}), 400
+        
+        client_id = data.get('client_id')
+        items = data.get('items', [])
+        
+        if not client_id:
+            return jsonify({'success': False, 'message': 'Cliente no especificado.'}), 400
+        
+        client = db.session.get(CreditClient, client_id)
+        if not client or client.store_id != current_user.store_id:
+            return jsonify({'success': False, 'message': 'Cliente no encontrado.'}), 404
+
+        # Validación de bloqueo por mora (> 2 meses sin abono y con deuda pendiente)
+        if client.is_blocked:
+            return jsonify({
+                'success': False,
+                'message': f'Cliente BLOQUEADO para ventas a crédito: tiene saldo pendiente de {format_cop(client.total_debt)} y lleva {client.days_without_payment} días (más de 2 meses) sin realizar abonos. Debe pagar la totalidad de la deuda para volver a fiar.'
+            }), 400
+        
+        if not items:
+            return jsonify({'success': False, 'message': 'El carrito está vacío.'}), 400
+        
+        # Calculate totals and validate products (same as regular sale)
+        sale_items = []
+        total = 0
+        
+        for item in items:
+            if item.get('is_custom'):
+                custom_name = item.get('custom_name', 'Varios').strip()
+                if not custom_name: custom_name = 'Varios'
+                custom_price = int(item.get('custom_price', 0))
+                if custom_price <= 0:
+                    return jsonify({'success': False, 'message': 'Precio inválido para producto personalizado.'}), 400
+                
+                # Reuse single Varios product per store
+                product = Product.query.filter_by(
+                    store_id=current_user.store_id, barcode='__CUSTOM__'
+                ).first()
+                if not product:
+                    fallback_cat = Category.query.filter_by(store_id=current_user.store_id).first()
+                    product = Product(
+                        store_id=current_user.store_id,
+                        name='Varios',
+                        price=0,
+                        category_id=fallback_cat.id if fallback_cat else None,
+                        is_active=False,
+                        barcode='__CUSTOM__'
+                    )
+                    db.session.add(product)
+                    db.session.flush()
+            else:
+                product = db.session.get(Product, item.get('product_id'))
+                if not product or product.store_id != current_user.store_id or not product.is_active:
+                    return jsonify({'success': False, 'message': 'Producto no encontrado o inactivo.'}), 400
+            
+            if getattr(product, 'sell_by_weight', False) and not item.get('is_custom'):
+                weight_grams = item.get('weight_grams', 0)
+                if not isinstance(weight_grams, int) or weight_grams < 10:
+                    return jsonify({'success': False, 'message': f'Peso inválido para {product.name}.'}), 400
+                if weight_grams > 50000:
+                    return jsonify({'success': False, 'message': f'Peso máximo 50kg para "{product.name}".'}), 400
+                
+                if product.weight_unit == 'lb':
+                    subtotal = round_to_50(product.price * (weight_grams / 500.0))
+                else:
+                    subtotal = round_to_50(product.price * (weight_grams / 1000.0))
+                
+                total += subtotal
+                sale_items.append({
+                    'product': product, 'quantity': 1, 'unit_price': product.price,
+                    'subtotal': subtotal, 'weight_grams': weight_grams, 'weight_unit': product.weight_unit,
+                    'is_custom': False
+                })
+            else:
+                quantity = item.get('quantity', 0)
+                if not isinstance(quantity, int) or quantity < 1:
+                    return jsonify({'success': False, 'message': f'Cantidad inválida para {product.name}.'}), 400
+                # Stock validation (skip for custom products)
+                if not item.get('is_custom') and not product.sell_by_weight and product.stock is not None:
+                    if product.stock <= 0:
+                        return jsonify({'success': False, 'message': f'El producto "{product.name}" está agotado.'}), 400
+                    if quantity > product.stock:
+                        return jsonify({'success': False, 'message': f'Stock insuficiente para "{product.name}". Disponible: {product.stock}'}), 400
+                
+                unit_price = custom_price if item.get('is_custom') else product.price
+                subtotal = unit_price * quantity
+                total += subtotal
+                sale_items.append({
+                    'product': product, 'quantity': quantity, 'unit_price': unit_price,
+                    'subtotal': subtotal, 'weight_grams': None, 'weight_unit': None,
+                    'is_custom': item.get('is_custom', False)
+                })
+        
+        if total <= 0:
+            return jsonify({'success': False, 'message': 'El total no puede ser $0.'}), 400
+        
+        # Get active session
+        active_session = get_today_session()
+        if not active_session:
+            return jsonify({'success': False, 'message': 'No hay caja abierta.'}), 400
+        
+        # Create the sale as 'fiado'
+        receipt_number = generate_receipt_number()
+        
+        sale = Sale(
+            store_id=current_user.store_id,
+            cash_session_id=active_session.id,
+            credit_client_id=client_id,
+            receipt_number=receipt_number,
+            user_id=get_effective_user_id(),
+            subtotal=total,
+            total=total,
+            payment_method='fiado',
+            amount_received=0,
+            change_given=0,
+            payment_ref=f'Fiado: {client.name}',
+            status='completada'
+        )
+        db.session.add(sale)
+        db.session.flush()
+        
+        # Create sale items
+        for si in sale_items:
+            sale_item = SaleItem(
+                sale_id=sale.id,
+                product_id=si['product'].id,
+                quantity=si['quantity'],
+                unit_price=si['unit_price'],
+                subtotal=si['subtotal'],
+                weight_grams=si.get('weight_grams'),
+                weight_unit=si.get('weight_unit')
+            )
+            db.session.add(sale_item)
+        
+        # Increment sale_count and decrement stock (skip for custom products)
+        for si in sale_items:
+            if si.get('is_custom'):
+                continue
+            prod = si['product']
+            prod.sale_count = (prod.sale_count or 0) + si['quantity']
+            
+            # Decrement stock if applicable
+            if not prod.sell_by_weight and prod.stock is not None:
+                prod.stock -= si['quantity']
+        
+        # Create credit sale record
+        credit_sale = CreditSale(
+            client_id=client_id,
+            sale_id=sale.id,
+            amount=total,
+            balance=total,
+            status='pendiente'
+        )
+        db.session.add(credit_sale)
+        
+        # Link order if provided
+        order_id = data.get('order_id')
+        if order_id:
+            order = db.session.get(Order, order_id)
+            if order and order.store_id == current_user.store_id:
+                order.sale_id = sale.id
+                order.status = 'completado'
+
+        db.session.commit()
+        
+        # Envío automático de factura detallada al correo del cliente
+        recipient_email = data.get('email', '').strip()
+        if recipient_email and not client.email:
+            client.email = recipient_email
+            db.session.commit()
+            
+        if client.email:
+            send_credit_sale_invoice(client, sale, sale_items)
+
+        return jsonify({
+            'success': True,
+            'message': f'Venta fiada registrada para {client.name}',
+            'sale': {
+                'id': sale.id,
+                'receipt_number': sale.receipt_number,
+                'total': sale.total,
+                'total_formatted': format_cop(sale.total),
+                'client_name': client.name,
+                'new_total_debt': client.total_debt
+            }
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
+
+
+@app.route('/api/verify-admin-pin', methods=['POST'])
+@login_required
+def api_verify_admin_pin():
+    """Verify administrator password/PIN to exit cashier mode."""
+    data = request.get_json() or {}
+    pin = data.get('password') or data.get('pin') or ''
+    
+    if not pin:
+        return jsonify({'success': False, 'message': 'Contraseña requerida.'}), 400
+        
+    admin = current_user if current_user.is_admin else User.query.filter_by(store_id=current_user.store_id, is_admin=True).first()
+    if not admin:
+        return jsonify({'success': False, 'message': 'Administrador no encontrado.'}), 404
+        
+    if admin.check_password(pin):
+        session['admin_pin_verified'] = True
+        return jsonify({'success': True, 'message': 'PIN correcto.'})
+    else:
+        return jsonify({'success': False, 'message': 'Contraseña incorrecta.'}), 401
+
+
+@app.route('/api/settings/printer', methods=['GET', 'POST'])
+@login_required
+def api_settings_printer():
+    settings = get_store_settings()
+    if request.method == 'POST':
+        data = request.get_json() or {}
+        printer_name = data.get('printer_name', '')
+        if settings:
+            settings.printer_name = printer_name
+            db.session.commit()
+        return jsonify({'success': True, 'printer_name': printer_name})
+    return jsonify({'success': True, 'printer_name': settings.printer_name if settings else ''})
+
+
+
+# ============================================================
+# CASHIER MANAGEMENT (Gestión de Cajeros)
+# ============================================================
 
 @app.route('/cashiers')
 @login_required
+@admin_only
 def cashiers():
-    return redirect(url_for('settings'))
+    """List all cashiers for the current store."""
+    store_cashiers = User.query.filter_by(store_id=current_user.store_id, is_admin=False).all()
+    settings = get_store_settings()
+    return render_template('cajeros.html', cashiers=store_cashiers, settings=settings)
 
-@app.route('/settings/hardware')
+
+@app.route('/cashiers/activate/<int:cashier_id>', methods=['POST'])
 @login_required
-def settings_hardware():
-    flash('El módulo de Hardware estará disponible en el siguiente sprint.', 'info')
-    return redirect(url_for('settings'))
+@admin_only
+def cashier_activate(cashier_id):
+    """Activate cashier mode for a specific cashier."""
+    cashier = User.query.filter_by(id=cashier_id, store_id=current_user.store_id, is_admin=False).first_or_404()
+    if not cashier.is_active_cashier:
+        return jsonify({'success': False, 'message': 'Este cajero está desactivado.'}), 400
+    
+    session['cashier_mode'] = True
+    session['active_cashier_id'] = cashier.id
+    session['active_cashier_name'] = cashier.username or cashier.name
+    
+    log_audit('CASHIER_MODE_ACTIVATE', f'Modo cajero activado: {cashier.username or cashier.name}', current_user.id)
+    return jsonify({'success': True, 'message': f'Modo cajero activado para {cashier.username or cashier.name}'})
+
+
+@app.route('/cashiers/deactivate', methods=['POST'])
+@login_required
+def cashier_deactivate():
+    """Deactivate cashier mode and return to admin mode."""
+    cashier_name = session.get('active_cashier_name', 'Cajero')
+    
+    # If current user is cashier (not admin), ensure PIN was verified and switch session to store admin
+    if not current_user.is_admin:
+        if not session.get('admin_pin_verified'):
+            data = request.get_json() or {}
+            pin = data.get('password') or data.get('pin') or ''
+            admin = User.query.filter_by(store_id=current_user.store_id, is_admin=True).first()
+            if not admin or not pin or not admin.check_password(pin):
+                return jsonify({'success': False, 'message': 'Contraseña de administrador requerida.'}), 401
+                
+        admin = User.query.filter_by(store_id=current_user.store_id, is_admin=True).first()
+        if admin:
+            login_user(admin)
+            
+    session.pop('cashier_mode', None)
+    session.pop('active_cashier_id', None)
+    session.pop('active_cashier_name', None)
+    session.pop('admin_pin_verified', None)
+    
+    log_audit('CASHIER_MODE_DEACTIVATE', f'Modo cajero desactivado ({cashier_name})', current_user.id)
+    return jsonify({'success': True, 'message': 'Modo cajero desactivado'})
+
+
+@app.route('/cashiers/add', methods=['POST'])
+@login_required
+@admin_only
+def cashier_add():
+    """Create a new cashier for the current store."""
+    username = request.form.get('username', '').strip()
+    password = request.form.get('password', '').strip()
+    
+    if not username or not password:
+        flash('Nombre y contraseña son obligatorios.', 'error')
+        return redirect(url_for('cashiers'))
+    
+    if len(password) < 4:
+        flash('La contraseña debe tener al menos 4 caracteres.', 'error')
+        return redirect(url_for('cashiers'))
+    
+    # Check if username already exists in this store
+    existing = User.query.filter_by(store_id=current_user.store_id, username=username).first()
+    if existing:
+        flash(f'Ya existe un cajero con el nombre "{username}".', 'error')
+        return redirect(url_for('cashiers'))
+    
+    cashier = User(
+        store_id=current_user.store_id,
+        name=username,
+        username=username,
+        email=f"cashier_{username.lower().replace(' ', '_')}_{current_user.store_id}@mercapp.local",
+        is_admin=False,
+        is_active_cashier=True
+    )
+    cashier.set_password(password)
+    db.session.add(cashier)
+    db.session.commit()
+    
+    session['cashier_mode'] = True
+    session['active_cashier_id'] = cashier.id
+    session['active_cashier_name'] = cashier.username or cashier.name
+    
+    log_audit('CASHIER_CREATE', f'Cajero creado y activado: {username} (ID: {cashier.id})', current_user.id)
+    flash(f'Cajero "{username}" creado y activado.', 'success')
+    return redirect(url_for('pos'))
+
+
+@app.route('/cashiers/<int:cashier_id>/edit', methods=['POST'])
+@login_required
+@admin_only
+def cashier_edit(cashier_id):
+    """Edit a cashier's name or password."""
+    cashier = db.session.get(User, cashier_id)
+    if not cashier or cashier.store_id != current_user.store_id or cashier.is_admin:
+        flash('Cajero no encontrado.', 'error')
+        return redirect(url_for('cashiers'))
+    
+    new_name = request.form.get('username', '').strip()
+    new_password = request.form.get('password', '').strip()
+    
+    if new_name and new_name != cashier.username:
+        existing = User.query.filter_by(store_id=current_user.store_id, username=new_name).first()
+        if existing and existing.id != cashier.id:
+            flash(f'Ya existe un cajero con el nombre "{new_name}".', 'error')
+            return redirect(url_for('cashiers'))
+        cashier.username = new_name
+        cashier.name = new_name
+    
+    if new_password:
+        if len(new_password) < 4:
+            flash('La contraseña debe tener al menos 4 caracteres.', 'error')
+            return redirect(url_for('cashiers'))
+        cashier.set_password(new_password)
+    
+    db.session.commit()
+    log_audit('CASHIER_UPDATE', f'Cajero editado: {cashier.username} (ID: {cashier.id})', current_user.id)
+    flash(f'Cajero "{cashier.username}" actualizado.', 'success')
+    return redirect(url_for('cashiers'))
+
+
+@app.route('/cashiers/<int:cashier_id>/toggle', methods=['POST'])
+@login_required
+@admin_only
+def cashier_toggle(cashier_id):
+    """Toggle a cashier's active status."""
+    cashier = db.session.get(User, cashier_id)
+    if not cashier or cashier.store_id != current_user.store_id or cashier.is_admin:
+        flash('Cajero no encontrado.', 'error')
+        return redirect(url_for('cashiers'))
+    
+    cashier.is_active_cashier = not cashier.is_active_cashier
+    db.session.commit()
+    
+    status = 'activado' if cashier.is_active_cashier else 'desactivado'
+    log_audit('CASHIER_TOGGLE', f'Cajero {status}: {cashier.username} (ID: {cashier.id})', current_user.id)
+    flash(f'Cajero "{cashier.username}" {status}.', 'success')
+    return redirect(url_for('cashiers'))
+
+
+@app.route('/cashiers/<int:cashier_id>/delete', methods=['POST'])
+@login_required
+@admin_only
+def cashier_delete(cashier_id):
+    """Delete a cashier (only if they have no sales)."""
+    cashier = db.session.get(User, cashier_id)
+    if not cashier or cashier.store_id != current_user.store_id or cashier.is_admin:
+        flash('Cajero no encontrado.', 'error')
+        return redirect(url_for('cashiers'))
+    
+    # Check if cashier has any sales
+    sale_count = Sale.query.filter_by(user_id=cashier.id).count()
+    if sale_count > 0:
+        flash(f'No se puede eliminar a "{cashier.username}" porque tiene {sale_count} ventas registradas. Puedes desactivarlo en su lugar.', 'error')
+        return redirect(url_for('cashiers'))
+    
+    username = cashier.username
+    db.session.delete(cashier)
+    db.session.commit()
+    log_audit('CASHIER_DELETE', f'Cajero eliminado: {username} (ID: {cashier_id})', current_user.id, 'WARNING')
+    flash(f'Cajero "{username}" eliminado exitosamente.', 'success')
+    return redirect(url_for('cashiers'))
+
+
+@app.route('/cashiers/sales')
+@login_required
+@admin_only
+def cashier_sales():
+    """View sales history by cashier, organized by day."""
+    from datetime import date as date_cls
+    
+    selected_date = request.args.get('date')
+    selected_cashier = request.args.get('cashier_id', type=int)
+    
+    if selected_date:
+        try:
+            view_date = datetime.strptime(selected_date, '%Y-%m-%d').date()
+        except ValueError:
+            view_date = date_cls.today()
+    else:
+        view_date = date_cls.today()
+    
+    # Get all cashiers for this store
+    store_cashiers = User.query.filter_by(store_id=current_user.store_id, is_admin=False).all()
+    settings = get_store_settings()
+    
+    # Build sales data per cashier for the selected date
+    cashier_data = []
+    for c in store_cashiers:
+        day_start = datetime.combine(view_date, datetime.min.time())
+        day_end = datetime.combine(view_date, datetime.max.time())
+        
+        sales = Sale.query.filter(
+            Sale.user_id == c.id,
+            Sale.sale_date >= day_start,
+            Sale.sale_date <= day_end,
+            Sale.status == 'completada'
+        ).order_by(Sale.sale_date.desc()).all()
+        
+        total = sum(s.total for s in sales)
+        
+        # Get session info
+        cash_session = CashSession.query.filter(
+            CashSession.user_id == c.id,
+            CashSession.opened_at >= day_start,
+            CashSession.opened_at <= day_end
+        ).first()
+        
+        cashier_data.append({
+            'cashier': c,
+            'sales': sales,
+            'total': total,
+            'sale_count': len(sales),
+            'session': cash_session
+        })
+    
+    return render_template('cajeros_ventas.html',
+                          cashier_data=cashier_data,
+                          view_date=view_date,
+                          selected_cashier=selected_cashier,
+                          cashiers=store_cashiers,
+                          settings=settings)
+
+@app.route('/debts')
+@login_required
+@admin_only
+def debts():
+    """List all credit clients with their debt status."""
+    search = request.args.get('search', '').strip()
+    status_filter = request.args.get('status', '')
+    
+    query = CreditClient.query.filter_by(store_id=current_user.store_id, is_active=True)
+    
+    if search:
+        query = query.filter(
+            db.or_(
+                CreditClient.name.ilike(f'%{search}%'),
+                CreditClient.phone.ilike(f'%{search}%'),
+                CreditClient.email.ilike(f'%{search}%')
+            )
+        )
+    
+    clients = query.order_by(CreditClient.name).all()
+    
+    # Filter by status in Python (since it's a computed property)
+    if status_filter == 'pendiente':
+        clients = [c for c in clients if c.debt_status == 'pendiente']
+    elif status_filter == 'pagado':
+        clients = [c for c in clients if c.debt_status == 'pagado']
+    
+    # Summary stats
+    total_debt = sum(c.total_debt for c in clients)
+    pending_count = sum(1 for c in clients if c.debt_status == 'pendiente')
+    
+    return render_template('deudas.html', clients=clients, total_debt=total_debt,
+                           pending_count=pending_count, search=search, status_filter=status_filter)
+
+
+@app.route('/debts/new-client', methods=['GET', 'POST'])
+@login_required
+@admin_only
+def debt_new_client():
+    """Create a new credit client and redirect to their POS view."""
+    if request.method == 'POST':
+        name = request.form.get('name', '').strip()
+        phone = request.form.get('phone', '').strip()
+        email = request.form.get('email', '').strip()
+        
+        if not name or len(name) < 2:
+            flash('El nombre del cliente debe tener al menos 2 caracteres.', 'error')
+            return redirect(url_for('debts'))
+        
+        client = CreditClient(
+            store_id=current_user.store_id,
+            name=name,
+            phone=phone if phone else None,
+            email=email if email else None
+        )
+        db.session.add(client)
+        db.session.commit()
+        
+        flash(f'Cliente "{name}" creado exitosamente.', 'success')
+        return redirect(url_for('debt_client_pos', client_id=client.id))
+    
+    return redirect(url_for('debts'))
+
+
+@app.route('/debts/client/<int:client_id>/edit', methods=['POST'])
+@login_required
+@admin_only
+def debt_edit_client(client_id):
+    """Update a credit client's details (name, phone, email)."""
+    client = db.session.get(CreditClient, client_id)
+    if not client or client.store_id != current_user.store_id:
+        flash('Cliente no encontrado.', 'error')
+        return redirect(url_for('debts'))
+        
+    name = request.form.get('name', '').strip()
+    phone = request.form.get('phone', '').strip()
+    email = request.form.get('email', '').strip()
+    
+    if not name or len(name) < 2:
+        flash('El nombre del cliente debe tener al menos 2 caracteres.', 'error')
+        return redirect(url_for('debts'))
+        
+    client.name = name
+    client.phone = phone if phone else None
+    client.email = email if email else None
+    db.session.commit()
+    flash(f'Cliente "{name}" actualizado exitosamente.', 'success')
+    return redirect(url_for('debts'))
+
+
+@app.route('/debts/client/<int:client_id>')
+@login_required
+@admin_only
+def debt_client_pos(client_id):
+    """POS view for a credit client - identical to caja but with client info."""
+    client = db.session.get(CreditClient, client_id)
+    if not client or client.store_id != current_user.store_id:
+        flash('Cliente no encontrado.', 'error')
+        return redirect(url_for('debts'))
+    
+    active_session = get_today_session()
+    if not active_session:
+        flash('Debes abrir caja primero para realizar ventas fiadas.', 'error')
+        return redirect(url_for('session_open'))
+    
+    categories = Category.query.filter_by(store_id=current_user.store_id, visible_in_pos=True).order_by(Category.display_order).all()
+    settings = get_store_settings()
+    
+    # Get all credit sales for this client with their sale items
+    credit_sales = CreditSale.query.options(joinedload(CreditSale.sale)).filter_by(client_id=client_id).order_by(CreditSale.created_at.desc()).all()
+    payments = CreditPayment.query.filter_by(client_id=client_id).order_by(CreditPayment.payment_date.desc()).all()
+    
+    return render_template('deudas_caja.html', client=client, categories=categories, 
+                           settings=settings, credit_sales=credit_sales, payments=payments)
+
+
+@app.route('/api/credit-payment', methods=['POST'])
+@login_required
+def api_credit_payment():
+    """Record a payment against a client's credit balance."""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'success': False, 'message': 'Datos inválidos.'}), 400
+        
+        client_id = data.get('client_id')
+        amount = data.get('amount', 0)
+        payment_method = data.get('payment_method', 'efectivo')
+        notes = data.get('notes', '')
+        
+        if not client_id:
+            return jsonify({'success': False, 'message': 'Cliente no especificado.'}), 400
+        
+        client = db.session.get(CreditClient, client_id)
+        if not client or client.store_id != current_user.store_id:
+            return jsonify({'success': False, 'message': 'Cliente no encontrado.'}), 404
+        
+        if not isinstance(amount, int) or amount < 100:
+            return jsonify({'success': False, 'message': 'El monto mínimo de pago es $100.'}), 400
+        
+        if amount > client.total_debt:
+            return jsonify({'success': False, 'message': f'El monto excede la deuda total ({format_cop(client.total_debt)}).'}), 400
+        
+        previous_debt = client.total_debt
+
+        # Record the payment
+        payment = CreditPayment(
+            client_id=client_id,
+            amount=amount,
+            payment_method=payment_method,
+            notes=notes
+        )
+        db.session.add(payment)
+        
+        # Apply payment to oldest unpaid credit sales first (FIFO)
+        remaining = amount
+        pending_sales = CreditSale.query.filter_by(
+            client_id=client_id, status='pendiente'
+        ).order_by(CreditSale.created_at.asc()).all()
+        
+        for cs in pending_sales:
+            if remaining <= 0:
+                break
+            if cs.balance <= remaining:
+                remaining -= cs.balance
+                cs.balance = 0
+                cs.status = 'pagado'
+            else:
+                cs.balance -= remaining
+                remaining = 0
+        
+        db.session.commit()
+        
+        # Envío automático de recibo al correo del cliente
+        if client.email:
+            send_credit_payment_receipt(client, payment, previous_debt)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Pago de {format_cop(amount)} registrado exitosamente.',
+            'new_total_debt': client.total_debt,
+            'new_total_debt_formatted': format_cop(client.total_debt),
+            'debt_status': client.debt_status,
+            'is_blocked': client.is_blocked
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
+
+
+@app.route('/debts/client/<int:client_id>/invoice')
+@login_required
+@admin_only
+def debt_client_invoice(client_id):
+    """Print a complete invoice for all credit purchases of a client."""
+    client = db.session.get(CreditClient, client_id)
+    if not client or client.store_id != current_user.store_id:
+        flash('Cliente no encontrado.', 'error')
+        return redirect(url_for('debts'))
+    
+    settings = get_store_settings()
+    all_credit_sales = CreditSale.query.options(joinedload(CreditSale.sale).joinedload(Sale.items)).filter_by(client_id=client_id).order_by(CreditSale.created_at.asc()).all()
+    pending_sales = [cs for cs in all_credit_sales if cs.status == 'pendiente']
+    paid_sales = [cs for cs in all_credit_sales if cs.status == 'pagado']
+    payments = CreditPayment.query.filter_by(client_id=client_id).order_by(CreditPayment.payment_date.asc()).all()
+    
+    return render_template('deudas_factura.html', client=client, settings=settings,
+                           pending_sales=pending_sales, paid_sales=paid_sales,
+                           credit_sales=all_credit_sales, payments=payments,
+                           now=datetime.now())
+
+# ============================================================
+# API REST BLUEPRINTS (Arquitectura en Capas)
+# ============================================================
+from controllers.user_controller import user_controller
+from controllers.product_controller import product_controller
+from controllers.sale_controller import sale_controller
+from controllers.merki_controller import merki_controller
+
+app.register_blueprint(user_controller)
+app.register_blueprint(product_controller)
+app.register_blueprint(sale_controller)
+app.register_blueprint(merki_controller)
+
+
+# ============================================================
+# HARDWARE API (SAT POS & Scale)
+# ============================================================
+# Hardware imports: solo disponibles en Windows (escritorio)
+try:
+    import serial
+    import serial.tools.list_ports
+    import win32print
+    import unidecode
+    HW_AVAILABLE = True
+except ImportError:
+    HW_AVAILABLE = False
+
+LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+os.makedirs(LOGS_DIR, exist_ok=True)
+
+
+@app.route('/api/hardware/printers', methods=['GET'])
+@login_required
+def api_hardware_printers():
+    if not HW_AVAILABLE:
+        return jsonify({'success': False, 'message': 'Hardware nativo no disponible. Usa impresión por navegador.'}), 501
+    try:
+        printers = [printer[2] for printer in win32print.EnumPrinters(2)]
+        return jsonify({'success': True, 'printers': printers})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/hardware/ports', methods=['GET'])
+@login_required
+def api_hardware_ports():
+    if not HW_AVAILABLE:
+        return jsonify({'success': False, 'message': 'Hardware nativo no disponible. Usa Web Serial API.'}), 501
+    try:
+        ports = []
+        for port in serial.tools.list_ports.comports():
+            ports.append({
+                'device': port.device,
+                'description': port.description,
+                'hwid': port.hwid
+            })
+        return jsonify({'success': True, 'ports': ports})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/hardware/open-drawer', methods=['POST'])
+@login_required
+def api_hardware_open_drawer():
+    if not HW_AVAILABLE:
+        return jsonify({'success': False, 'message': 'Hardware nativo no disponible.'}), 501
+    data = request.get_json()
+    printer_name = data.get('printer_name')
+    if not printer_name:
+        return jsonify({'success': False, 'message': 'Impresora no especificada.'}), 400
+    try:
+        hPrinter = win32print.OpenPrinter(printer_name)
+        try:
+            cmd = b'\x1B\x70\x00\x19\xFA'
+            win32print.StartDocPrinter(hPrinter, 1, ("OpenDrawer", None, "RAW"))
+            try:
+                win32print.StartPagePrinter(hPrinter)
+                win32print.WritePrinter(hPrinter, cmd)
+                win32print.EndPagePrinter(hPrinter)
+            finally:
+                win32print.EndDocPrinter(hPrinter)
+            return jsonify({'success': True})
+        finally:
+            win32print.ClosePrinter(hPrinter)
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/hardware/print', methods=['POST'])
+@login_required
+def api_hardware_print():
+    if not HW_AVAILABLE:
+        return jsonify({'success': False, 'message': 'Hardware nativo no disponible. Usa impresión por navegador.'}), 501
+    data = request.get_json()
+    printer_name = data.get('printer_name')
+    if not printer_name:
+        return jsonify({'success': False, 'message': 'Impresora no especificada.'}), 400
+    
+    sale_id = data.get('sale_id')
+    sale = db.session.get(Sale, sale_id)
+    if not sale:
+        return jsonify({'success': False, 'message': 'Venta no encontrada.'}), 404
+        
+    settings = get_store_settings()
+    
+    try:
+        ESC = b'\x1b'
+        GS = b'\x1d'
+        INIT = ESC + b'@'
+        ALIGN_CENTER = ESC + b'a\x01'
+        ALIGN_LEFT = ESC + b'a\x00'
+        BOLD_ON = ESC + b'E\x01'
+        BOLD_OFF = ESC + b'E\x00'
+        CUT = GS + b'V\x42\x00'
+        
+        lines = []
+        def add_line(text, center=False, bold=False):
+            cmd = b''
+            if center: cmd += ALIGN_CENTER
+            else: cmd += ALIGN_LEFT
+            if bold: cmd += BOLD_ON
+            
+            safe_text = unidecode.unidecode(text)
+            cmd += safe_text.encode('ascii', errors='replace') + b'\n'
+            
+            if bold: cmd += BOLD_OFF
+            lines.append(cmd)
+            
+        lines.append(INIT)
+        add_line(settings.store_name, center=True, bold=True)
+        add_line(f"NIT: {settings.nit}", center=True)
+        add_line(f"Dir: {settings.direccion}", center=True)
+        add_line(f"Tel: {settings.telefono}", center=True)
+        add_line("------------------------------------------", center=True)
+        add_line(f"Factura: {sale.receipt_number}")
+        add_line(f"Fecha: {sale.sale_date.strftime('%Y-%m-%d %H:%M')}")
+        add_line(f"Cajero: {sale.cashier.name}")
+        add_line("------------------------------------------", center=True)
+        
+        for item in sale.items:
+            name = item.product.name[:22]
+            qty = f"{item.quantity}" if not item.weight_grams else f"{item.weight_grams/1000}kg"
+            
+            val2 = item.subtotal
+            subt_f = f"${val2:,.0f}".replace(',', '.')
+            
+            add_line(f"{name:<22} {qty:>6} {subt_f:>10}")
+            
+        add_line("------------------------------------------", center=True)
+        add_line(f"TOTAL:                     {f'${sale.total:,.0f}'.replace(',', '.')}", bold=True)
+        add_line(f"Pago:                      {sale.payment_method.capitalize()}")
+        add_line(f"Recibido:                  {f'${sale.amount_received:,.0f}'.replace(',', '.')}")
+        add_line(f"Cambio:                    {f'${sale.change_given:,.0f}'.replace(',', '.')}")
+        add_line("------------------------------------------", center=True)
+        add_line(settings.mensaje_ticket, center=True)
+        add_line(" ", center=True)
+        add_line(" ", center=True)
+        lines.append(CUT)
+        
+        raw_data = b''.join(lines)
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Error preparando ticket: {str(e)}'}), 500
+    
+    import threading
+    def _send_to_printer(pname, data_bytes):
+        try:
+            hPrinter = win32print.OpenPrinter(pname)
+            try:
+                win32print.StartDocPrinter(hPrinter, 1, ("ImpresionPOS", None, "RAW"))
+                try:
+                    win32print.StartPagePrinter(hPrinter)
+                    win32print.WritePrinter(hPrinter, data_bytes)
+                    win32print.EndPagePrinter(hPrinter)
+                finally:
+                    win32print.EndDocPrinter(hPrinter)
+            finally:
+                win32print.ClosePrinter(hPrinter)
+        except Exception as ex:
+            app.logger.error(f"Background print error: {ex}")
+    
+    threading.Thread(target=_send_to_printer, args=(printer_name, raw_data), daemon=True).start()
+    return jsonify({'success': True})
+
+
+@app.route('/api/hardware/print-summary', methods=['POST'])
+@login_required
+def api_hardware_print_summary():
+    if not HW_AVAILABLE:
+        return jsonify({'success': False, 'message': 'Hardware nativo no disponible.'}), 501
+    
+    data = request.get_json()
+    printer_name = data.get('printer_name')
+    if not printer_name:
+        return jsonify({'success': False, 'message': 'Impresora no especificada.'}), 400
+        
+    date_from_str = data.get('date_from', '')
+    date_to_str = data.get('date_to', '')
+    method_filter = data.get('method', '')
+    
+    query = Sale.query.filter_by(store_id=current_user.store_id, status='completada')
+    
+    label_fecha = "Resumen General"
+    
+    if date_from_str:
+        try:
+            df = datetime.strptime(date_from_str, '%Y-%m-%d')
+            query = query.filter(Sale.sale_date >= df)
+            label_fecha = f"Desde: {date_from_str}"
+        except ValueError:
+            pass
+            
+    if date_to_str:
+        try:
+            dt = datetime.strptime(date_to_str, '%Y-%m-%d')
+            dt = dt.replace(hour=23, minute=59, second=59)
+            query = query.filter(Sale.sale_date <= dt)
+            label_fecha += f" Hasta: {date_to_str}"
+        except ValueError:
+            pass
+            
+    if method_filter:
+        query = query.filter_by(payment_method=method_filter)
+        label_fecha += f" ({method_filter})"
+        
+    if not date_from_str and not date_to_str:
+        label_fecha = f"Hoy: {datetime.now().strftime('%Y-%m-%d')}"
+        today = datetime.now()
+        df = datetime(today.year, today.month, today.day)
+        query = query.filter(Sale.sale_date >= df)
+        
+    sales = query.all()
+    
+    cash = sum(s.total for s in sales if s.payment_method == 'efectivo')
+    transfer = sum(s.total for s in sales if s.payment_method == 'transferencia')
+    card = sum(s.total for s in sales if s.payment_method == 'tarjeta')
+    total = sum(s.total for s in sales)
+    count = len(sales)
+    
+    settings = get_store_settings()
+    
+    try:
+        hPrinter = win32print.OpenPrinter(printer_name)
+        try:
+            ESC = b'\x1b'
+            GS = b'\x1d'
+            INIT = ESC + b'@'
+            ALIGN_CENTER = ESC + b'a\x01'
+            ALIGN_LEFT = ESC + b'a\x00'
+            BOLD_ON = ESC + b'E\x01'
+            BOLD_OFF = ESC + b'E\x00'
+            CUT = GS + b'V\x42\x00'
+            
+            lines = []
+            def add_line(text, center=False, bold=False):
+                cmd = b''
+                if center: cmd += ALIGN_CENTER
+                else: cmd += ALIGN_LEFT
+                if bold: cmd += BOLD_ON
+                
+                safe_text = unidecode.unidecode(text)
+                cmd += safe_text.encode('ascii', errors='replace') + b'\n'
+                
+                if bold: cmd += BOLD_OFF
+                lines.append(cmd)
+                
+            lines.append(INIT)
+            add_line(settings.store_name, center=True, bold=True)
+            add_line("RESUMEN DE VENTAS", center=True, bold=True)
+            add_line("------------------------------------------", center=True)
+            add_line(label_fecha, center=True)
+            add_line(f"Generado: {datetime.now().strftime('%H:%M:%S')}", center=True)
+            add_line("------------------------------------------", center=True)
+            
+            add_line(f"Cant. Facturas: {count}")
+            add_line(" ")
+            
+            def fmt_val(v):
+                return f"${v:,.0f}".replace(',', '.')
+                
+            add_line(f"Efectivo:      {fmt_val(cash):>15}", bold=True)
+            add_line(f"Transferencia: {fmt_val(transfer):>15}")
+            add_line(f"Tarjeta:       {fmt_val(card):>15}")
+            add_line("------------------------------------------", center=True)
+            add_line(f"TOTAL VENTAS:  {fmt_val(total):>15}", bold=True)
+            add_line("------------------------------------------", center=True)
+            add_line(" ", center=True)
+            add_line(" ", center=True)
+            
+            lines.append(CUT)
+            
+            raw_data = b''.join(lines)
+            
+            win32print.StartDocPrinter(hPrinter, 1, ("ImpresionPOS_Z", None, "RAW"))
+            try:
+                win32print.StartPagePrinter(hPrinter)
+                win32print.WritePrinter(hPrinter, raw_data)
+                win32print.EndPagePrinter(hPrinter)
+            finally:
+                win32print.EndDocPrinter(hPrinter)
+            return jsonify({'success': True})
+        finally:
+            win32print.ClosePrinter(hPrinter)
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/hardware/print-debt', methods=['POST'])
+@login_required
+def api_hardware_print_debt():
+    if not HW_AVAILABLE:
+        return jsonify({'success': False, 'message': 'Hardware nativo no disponible. Usa impresión por navegador.'}), 501
+    data = request.get_json()
+    printer_name = data.get('printer_name')
+    if not printer_name:
+        return jsonify({'success': False, 'message': 'Impresora no especificada.'}), 400
+    
+    client_id = data.get('client_id')
+    client = db.session.get(CreditClient, client_id)
+    if not client:
+        return jsonify({'success': False, 'message': 'Cliente no encontrado.'}), 404
+        
+    settings = get_store_settings()
+    credit_sales = CreditSale.query.filter_by(client_id=client_id).order_by(CreditSale.created_at.asc()).all()
+    payments = CreditPayment.query.filter_by(client_id=client_id).order_by(CreditPayment.payment_date.asc()).all()
+    
+    try:
+        hPrinter = win32print.OpenPrinter(printer_name)
+        try:
+            ESC = b'\x1b'
+            GS = b'\x1d'
+            INIT = ESC + b'@'
+            ALIGN_CENTER = ESC + b'a\x01'
+            ALIGN_LEFT = ESC + b'a\x00'
+            BOLD_ON = ESC + b'E\x01'
+            BOLD_OFF = ESC + b'E\x00'
+            CUT = GS + b'V\x42\x00'
+            
+            lines = []
+            def add_line(text, center=False, bold=False):
+                cmd = b''
+                if center: cmd += ALIGN_CENTER
+                else: cmd += ALIGN_LEFT
+                if bold: cmd += BOLD_ON
+                
+                safe_text = unidecode.unidecode(text)
+                cmd += safe_text.encode('ascii', errors='replace') + b'\n'
+                
+                if bold: cmd += BOLD_OFF
+                lines.append(cmd)
+                
+            lines.append(INIT)
+            add_line(settings.store_name, center=True, bold=True)
+            add_line("ESTADO DE CUENTA - FIADO", center=True, bold=True)
+            add_line("--------------------------------", center=True)
+            add_line(f"Cliente: {client.name}")
+            if client.phone:
+                add_line(f"Tel: {client.phone}")
+            add_line(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+            add_line("--------------------------------", center=True)
+            
+            for cs in credit_sales:
+                add_line(f"{cs.created_at.strftime('%d/%m')} Fac:{cs.sale.receipt_number}")
+                for item in cs.sale.items:
+                    name = item.product.name if item.product else 'Producto'
+                    val2 = item.subtotal
+                    subt_f = f"${val2:,.0f}".replace(',', '.')
+                    add_line(f"  {name}")
+                    add_line(f"    {subt_f}")
+                add_line(f"  Total Compra: {f'${cs.amount:,.0f}'.replace(',', '.')}")
+                if cs.balance > 0 and cs.balance != cs.amount:
+                    add_line(f"  Pendiente:    {f'${cs.balance:,.0f}'.replace(',', '.')}")
+                add_line(" ")
+                
+            if payments:
+                add_line("PAGOS REGISTRADOS", center=True, bold=True)
+                for p in payments:
+                    add_line(f"{p.payment_date.strftime('%d/%m')} {p.payment_method.capitalize()}")
+                    add_line(f"  Monto:       -{f'${p.amount:,.0f}'.replace(',', '.')}")
+                add_line(" ")
+            
+            add_line("--------------------------------", center=True)
+            add_line(f"Total Comprado:  {f'${client.total_purchased:,.0f}'.replace(',', '.')}")
+            add_line(f"Total Pagado:    {f'${client.total_paid:,.0f}'.replace(',', '.')}")
+            add_line("--------------------------------", center=True)
+            add_line(f"SALDO PENDIENTE: {f'${client.total_debt:,.0f}'.replace(',', '.')}", bold=True)
+            add_line("--------------------------------", center=True)
+            
+            add_line("Documento informativo.", center=True)
+            add_line(" ", center=True)
+            add_line(" ", center=True)
+            add_line(" ", center=True)
+            lines.append(CUT)
+            
+            raw_data = b''.join(lines)
+            
+            win32print.StartDocPrinter(hPrinter, 1, ("ImpresionEstadoCuenta", None, "RAW"))
+            try:
+                win32print.StartPagePrinter(hPrinter)
+                win32print.WritePrinter(hPrinter, raw_data)
+                win32print.EndPagePrinter(hPrinter)
+            finally:
+                win32print.EndDocPrinter(hPrinter)
+            return jsonify({'success': True})
+        finally:
+            win32print.ClosePrinter(hPrinter)
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/hardware/weight', methods=['GET'])
+@login_required
+def api_hardware_weight():
+    if not HW_AVAILABLE:
+        return jsonify({'success': False, 'message': 'Hardware nativo no disponible. Usa Web Serial API.'}), 501
+    port = request.args.get('port')
+    if not port:
+        return jsonify({'success': False, 'message': 'Puerto no especificado.'}), 400
+    
+    weight = read_weight_from_port(port)
+    if weight is not None:
+        return jsonify({'success': True, 'weight_grams': weight})
+    else:
+        return jsonify({'success': False, 'message': 'No se pudo leer peso del puerto.'}), 500
+
+
+@app.route('/api/hardware/detect-scale', methods=['GET'])
+@login_required
+def api_hardware_detect_scale():
+    """Attempt to auto-detect which port has the scale connected."""
+    if not HW_AVAILABLE:
+        return jsonify({'success': False, 'message': 'Hardware nativo no disponible. Usa Web Serial API.'}), 501
+    available_ports = serial.tools.list_ports.comports()
+    
+    if not available_ports:
+        return jsonify({'success': False, 'message': 'No se detectaron puertos COM. Verifica que el cable serial esté conectado.'})
+    
+    ordered_ports = sorted(available_ports, 
+                           key=lambda p: any(x in p.description.lower() for x in ['usb', 'serial', 'ch34', 'prolific', 'cp21', 'ftdi', 'com']), 
+                           reverse=True)
+    
+    debug_log = []
+    for p in ordered_ports:
+        msg = f"Probando {p.device} ({p.description})"
+        print(f"DEBUG BASCULA: {msg}")
+        debug_log.append(msg)
+        weight = read_weight_from_port(p.device, timeout=1.5)
+        if weight is not None:
+            return jsonify({
+                'success': True, 
+                'port': p.device, 
+                'description': p.description,
+                'weight_test': weight,
+                'debug': debug_log
+            })
+    
+    try:
+        with open(os.path.join(LOGS_DIR, 'scale_debug.log'), 'a', encoding='utf-8') as f:
+            f.write(f"\n[{datetime.now()}] Auto-detect failed.\n")
+            f.write(f"  Ports tried: {[p.device + ' (' + p.description + ')' for p in ordered_ports]}\n")
+    except: pass
+            
+    return jsonify({
+        'success': False, 
+        'message': f'No se detectó báscula en {len(ordered_ports)} puerto(s): {", ".join(p.device for p in ordered_ports)}. Verifica la conexión y que la báscula esté encendida.',
+        'ports_found': [{'device': p.device, 'description': p.description} for p in ordered_ports]
+    })
+
+
+def read_weight_from_port(port, timeout=2):
+    """Helper to read weight from a specific COM port.
+    Supports SAT CS30 format: +00123.45 kg\\r\\n or similar ASCII weight strings."""
+    ser = None
+    import time as _time
+    
+    try:
+        for baud in [9600, 4800, 2400]:
+            try:
+                ser = serial.Serial(port, baudrate=baud, timeout=timeout,
+                                    bytesize=serial.EIGHTBITS,
+                                    parity=serial.PARITY_NONE,
+                                    stopbits=serial.STOPBITS_ONE)
+                
+                ser.reset_input_buffer()
+                
+                try:
+                    ser.write(b'\x05')
+                    _time.sleep(0.1)
+                    ser.write(b'P\r\n')
+                    _time.sleep(0.1)
+                except: pass
+                
+                _time.sleep(0.5)
+                
+                raw_lines = []
+                max_attempts = 20
+                for attempt in range(max_attempts):
+                    waiting = ser.in_waiting
+                    if waiting > 0:
+                        chunk = ser.read(waiting)
+                        decoded = chunk.decode('ascii', errors='ignore')
+                        lns = [l.strip() for l in decoded.split('\n') if l.strip()]
+                        raw_lines.extend(lns)
+                        if len(raw_lines) >= 3:
+                            break
+                    elif attempt > 5 and raw_lines:
+                        break
+                    _time.sleep(0.15)
+                
+                ser.close()
+                
+                if not raw_lines:
+                    continue
+                
+                try:
+                    with open(os.path.join(LOGS_DIR, 'scale_debug.log'), 'a', encoding='utf-8') as f:
+                        f.write(f"[{datetime.now()}] Port:{port} Baud:{baud} Raw:{raw_lines}\n")
+                except: pass
+                    
+                for l in reversed(raw_lines):
+                    match = re.search(r'[+-]?\s*(\d+\.?\d*)\s*(kg|g|lb)?', l, re.IGNORECASE)
+                    if match:
+                        val_str = match.group(1)
+                        unit = (match.group(2) or '').lower()
+                        val = float(val_str)
+                        
+                        if val == 0 and len(raw_lines) > 1:
+                            continue
+                        
+                        if unit == 'g':
+                            grams = int(val)
+                        elif unit == 'lb':
+                            grams = int(val * 453.592)
+                        elif unit == 'kg' or val < 100:
+                            grams = int(val * 1000)
+                        else:
+                            grams = int(val)
+                        
+                        return grams
+                        
+            except serial.SerialException as e:
+                if ser and ser.is_open: ser.close()
+                if 'access' in str(e).lower() or 'denied' in str(e).lower():
+                    try:
+                        with open(os.path.join(LOGS_DIR, 'scale_debug.log'), 'a', encoding='utf-8') as f:
+                            f.write(f"[{datetime.now()}] ACCESO DENEGADO en {port}: {e}\n")
+                    except: pass
+                continue
+            except Exception as e:
+                if ser and ser.is_open: ser.close()
+                continue
+    except Exception as e:
+        try:
+            with open(os.path.join(LOGS_DIR, 'scale_debug.log'), 'a', encoding='utf-8') as f:
+                f.write(f"[{datetime.now()}] ERROR GENERAL: {e}\n")
+        except: pass
+    finally:
+        if ser and ser.is_open: ser.close()
+    return None
+
+
+@app.route('/api/hardware/scale-debug', methods=['GET'])
+@login_required
+def api_hardware_scale_debug():
+    """Deep diagnostic for scale connection — tries all ports with all baud rates and logs raw data."""
+    if not HW_AVAILABLE:
+        return jsonify({'success': False, 'message': 'Hardware nativo no disponible en este entorno.'}), 501
+    
+    import time as _time
+    available_ports = serial.tools.list_ports.comports()
+    results = []
+    
+    for p in available_ports:
+        port_result = {'device': p.device, 'description': p.description, 'hwid': getattr(p, 'hwid', ''), 'bauds': {}}
+        for baud in [9600, 4800, 2400, 19200]:
+            baud_result = {'raw_data': [], 'error': None, 'bytes_waiting': 0}
+            ser = None
+            try:
+                ser = serial.Serial(p.device, baudrate=baud, timeout=2,
+                                    bytesize=serial.EIGHTBITS,
+                                    parity=serial.PARITY_NONE,
+                                    stopbits=serial.STOPBITS_ONE)
+                ser.reset_input_buffer()
+                try:
+                    ser.write(b'\x05')
+                    _time.sleep(0.1)
+                    ser.write(b'P\r\n')
+                    _time.sleep(0.1)
+                except Exception:
+                    pass
+                _time.sleep(0.3)
+                if ser.in_waiting > 0:
+                    data = ser.read(ser.in_waiting)
+                    baud_result['raw_data'].append(str(data))
+                    baud_result['bytes_waiting'] = len(data)
+                ser.close()
+            except Exception as e:
+                baud_result['error'] = str(e)
+                if ser and ser.is_open:
+                    ser.close()
+            port_result['bauds'][baud] = baud_result
+        results.append(port_result)
+    return jsonify({'success': True, 'ports': results})
+
+
+@app.route('/api/hardware/web-serial-config', methods=['GET'])
+@login_required
+def api_web_serial_config():
+    """Return configuration for Web Serial API (browser-based hardware)."""
+    return jsonify({
+        'success': True,
+        'scale': {
+            'baud_rates': [9600, 4800, 2400],
+            'data_bits': 8,
+            'stop_bits': 1,
+            'parity': 'none',
+            'weight_pattern': r'([0-9]+\.[0-9]+|[0-9]+)',
+            'unit_hint': 'kg'
+        },
+        'drawer': {
+            'command': [27, 112, 0, 25, 250],
+            'description': 'ESC/POS cash drawer kick command'
+        },
+        'printer': {
+            'init': [27, 64],
+            'align_center': [27, 97, 1],
+            'align_left': [27, 97, 0],
+            'bold_on': [27, 69, 1],
+            'bold_off': [27, 69, 0],
+            'cut': [29, 86, 66, 0]
+        },
+        'hw_native_available': HW_AVAILABLE
+    })
+
+
+@app.route('/api/sync/status', methods=['GET'])
+def api_sync_status():
+    """Retorna estado de conexión y disponibilidad de la base de datos local."""
+    return jsonify({
+        'status': 'ok',
+        'mode': 'offline-first',
+        'database': 'sqlite-local',
+        'timestamp': datetime.now().isoformat(),
+        'synchronized': True
+    })
+
+
+@app.route('/api/health', methods=['GET'])
+def api_health():
+    """Enterprise health check endpoint for monitoring and load testing."""
+    start_t = time.time()
+    db_ok = True
+    try:
+        db.session.execute(text("SELECT 1")).scalar()
+    except Exception:
+        db_ok = False
+    duration_ms = round((time.time() - start_t) * 1000, 2)
+    return jsonify({
+        'status': 'healthy' if db_ok else 'degraded',
+        'database': 'connected' if db_ok else 'error',
+        'db_latency_ms': duration_ms,
+        'timestamp': datetime.now().isoformat(),
+        'version': 'IS2-Enterprise',
+        'sqlite_wal': True
+    }), (200 if db_ok else 500)
 
 
 # ============================================================
@@ -1249,4 +4931,67 @@ def settings_hardware():
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
+        
+        # Initialize License if missing (lock immediately on first run)
+        if not AppLicense.query.first():
+            initial_license = AppLicense(expiration_date=datetime(2000, 1, 1), last_time_checked=datetime.now())
+            db.session.add(initial_license)
+            db.session.commit()
+        
+        # Migración segura: agregar columnas si no existen en base de datos SQLite existente
+        try:
+            with db.engine.connect() as conn:
+                conn.execute(db.text("ALTER TABLE cliente_credito ADD COLUMN email VARCHAR(120)"))
+                conn.commit()
+        except Exception:
+            pass
+        try:
+            with db.engine.connect() as conn:
+                conn.execute(db.text("ALTER TABLE usuario ADD COLUMN username VARCHAR(50)"))
+                conn.commit()
+        except Exception:
+            pass
+        try:
+            with db.engine.connect() as conn:
+                conn.execute(db.text("ALTER TABLE usuario ADD COLUMN is_active_cashier BOOLEAN DEFAULT 1"))
+                conn.commit()
+        except Exception:
+            pass
+        try:
+            with db.engine.connect() as conn:
+                conn.execute(db.text("ALTER TABLE cliente ADD COLUMN created_at DATETIME"))
+                conn.commit()
+        except Exception:
+            pass
+        
+        # Seed: crear categorías por defecto para tiendas existentes sin categorías
+        stores_without_cats = Store.query.filter(~Store.id.in_(
+            db.session.query(Category.store_id).distinct()
+        )).all()
+        if stores_without_cats:
+            default_categories = [
+                {'name': 'Bebidas',          'slug': 'bebidas',          'image': 'Bebidas.jpg',          'description': 'Gaseosas, jugos, agua y más'},
+                {'name': 'Lácteos',          'slug': 'lacteos',          'image': 'Lácteos.avif',         'description': 'Leche, queso, yogurt y derivados'},
+                {'name': 'Despensa',         'slug': 'despensa',         'image': 'Despensa.jfif',        'description': 'Granos, aceites, enlatados y básicos'},
+                {'name': 'Snacks',           'slug': 'snacks',           'image': 'Snacks.jfif',          'description': 'Papas, galletas, dulces y antojos'},
+                {'name': 'Frescos',          'slug': 'frescos',          'image': 'frescos.webp',         'description': 'Frutas, verduras y productos frescos'},
+                {'name': 'Limpieza y Aseo',  'slug': 'limpieza_y_aseo',  'image': 'limpieza_y_aseo.jfif', 'description': 'Jabones, detergentes y aseo del hogar'},
+                {'name': 'Farmacia',         'slug': 'farmacia',         'image': 'Farmacia.jfif',        'description': 'Medicamentos y cuidado personal'},
+                {'name': 'Mascotas',         'slug': 'mascotas',         'image': 'Mascotas.jfif',        'description': 'Alimentos y accesorios para mascotas'},
+            ]
+            for store in stores_without_cats:
+                for order, cat_data in enumerate(default_categories, start=1):
+                    cat = Category(
+                        store_id=store.id,
+                        name=cat_data['name'],
+                        slug=cat_data['slug'],
+                        image=cat_data['image'],
+                        description=cat_data['description'],
+                        display_order=order,
+                        visible_in_pos=True
+                    )
+                    db.session.add(cat)
+            db.session.commit()
+            print(f"[SEED] Categorías por defecto creadas para {len(stores_without_cats)} tienda(s).")
+        
     app.run(debug=True, port=5001)
