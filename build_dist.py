@@ -20,17 +20,12 @@ def clean_old():
 
 def copy_application_files():
     print("[2/5] Copiando archivos de la aplicacion...")
-    # 1. Backend source files & directories
-    for item in ['app.py', 'launcher.py', 'requirements.txt', '.env', 'mercapp.ico', 'iniciar_mercapp.bat']:
-        src = os.path.join(BASE_DIR, item)
-        if os.path.exists(src):
-            shutil.copy2(src, PACKAGE_FOLDER)
-
-    for folder in ['controllers', 'dtos', 'models', 'repositories', 'services', 'utilities', 'uploads']:
-        src = os.path.join(BASE_DIR, folder)
-        dst = os.path.join(PACKAGE_FOLDER, folder)
-        if os.path.exists(src):
-            shutil.copytree(src, dst, dirs_exist_ok=True, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    
+    # 1. Copiar ejecutable nativo MercAPP.exe si existe
+    exe_src = os.path.join(BASE_DIR, 'dist', 'MercAPP.exe')
+    if os.path.exists(exe_src):
+        shutil.copy2(exe_src, os.path.join(PACKAGE_FOLDER, 'MercAPP.exe'))
+        print("  - Ejecutable binario nativo MercAPP.exe copiado.")
 
     # 2. Copiar base de datos SQLite mercapp.db
     db_src = os.path.join(BASE_DIR, 'mercapp.db')
@@ -38,19 +33,21 @@ def copy_application_files():
         shutil.copy2(db_src, os.path.join(PACKAGE_FOLDER, 'mercapp.db'))
         print("  - Base de datos local mercapp.db copiada.")
 
-    # 3. Frontend folder (MercAPP_IS2_Frontend)
-    dst_frontend = os.path.join(PACKAGE_FOLDER, 'MercAPP_IS2_Frontend')
-    for sub in ['templates', 'static']:
-        src_sub = os.path.join(FRONTEND_DIR, sub)
-        dst_sub = os.path.join(dst_frontend, sub)
-        if os.path.exists(src_sub):
-            shutil.copytree(src_sub, dst_sub, dirs_exist_ok=True, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
-    print("  - Plantillas y recursos estáticos copiados.")
+    # 3. Copiar archivos clave de configuracion e iconos
+    for item in ['mercapp.ico', '.env']:
+        src = os.path.join(BASE_DIR, item)
+        if os.path.exists(src):
+            shutil.copy2(src, PACKAGE_FOLDER)
+
+    # 4. Carpeta de uploads (para imagenes de productos y categorias)
+    uploads_dir = os.path.join(PACKAGE_FOLDER, 'uploads')
+    os.makedirs(os.path.join(uploads_dir, 'products'), exist_ok=True)
+    os.makedirs(os.path.join(uploads_dir, 'categories'), exist_ok=True)
 
 def create_launcher_and_readme():
     print("[3/5] Creando accesos directos y manual de instrucciones...")
     
-    # Batch directo en la raiz del paquete
+    # Batch directo en la raiz del paquete para compatibilidad
     bat_content = """@echo off
 title MercAPP IS2 - Punto de Venta
 cd /d "%~dp0"
@@ -60,24 +57,21 @@ echo        Iniciando MercAPP IS2 (Punto de Venta)
 echo ========================================================
 echo.
 
+if exist "MercAPP.exe" (
+    echo [INFO] Iniciando ejecutable MercAPP.exe...
+    start "" "MercAPP.exe"
+    exit /b
+)
+
 where python >nul 2>nul
 if %ERRORLEVEL% equ 0 (
     echo [INFO] Iniciando con Python...
     python launcher.py
-    goto FIN
+    exit /b
 )
 
-if exist "venv\\Scripts\\python.exe" (
-    echo [INFO] Utilizando entorno virtual local...
-    "venv\\Scripts\\python.exe" launcher.py
-    goto FIN
-)
-
-echo [ERROR] No se detecto instalacion de Python en este equipo.
-echo Por favor instala Python 3.10 o superior (marcando 'Add Python to PATH').
+echo [ERROR] No se encontro MercAPP.exe ni Python instalado.
 pause
-
-:FIN
 """
     with open(os.path.join(PACKAGE_FOLDER, 'INICIAR_MERCAPP.bat'), 'w', encoding='utf-8') as f:
         f.write(bat_content)
@@ -89,28 +83,28 @@ pause
 INSTRUCCIONES DE USO:
 ------------------------------------------------------------
 1. Para iniciar el sistema:
-   Haz doble clic en: INICIAR_MERCAPP.bat
+   Simplemente haz doble clic en: MercAPP.exe
+   (o en INICIAR_MERCAPP.bat).
+   No requiere instalar Python ni configurar librerías.
 
-2. MercAPP iniciará el servidor local de alto rendimiento (Waitress)
-   y abrirá automáticamente la ventana de aplicación en modo
-   escritorio (usando Microsoft Edge o Google Chrome sin barras
-   de navegación para emular una aplicación nativa de POS).
+2. MercAPP iniciará automáticamente el servidor local de alto
+   rendimiento y abrirá la ventana de aplicación en modo quiosco
+   de escritorio (sin barras de navegación para emular un POS nativo).
 
-3. Funcionamiento Offline:
+3. Licencia del Sistema:
+   - Contraseña maestra de desbloqueo y renovación (60 días):
+     Foreroyulian321.2026
+   - Al abrir por primera vez, ingresa la clave para activar
+     tu periodo bimensual de uso.
+
+4. Funcionamiento Offline:
    MercAPP IS2 funciona 100% de manera autónoma y local
    utilizando la base de datos SQLite 'mercapp.db'. No requiere
    conexión a internet para el cobro, escaneo, tickets ni arqueos.
-   Cuando exista conexión, las notificaciones y correos se
-   sincronizan automáticamente.
 
-4. Acceso por defecto:
-   - URL Local: http://127.0.0.1:5001/pos
-   - Credenciales de Administrador:
-     Email: tu correo registrado o configurado
-   - Asistente de Voz Merki:
-     Presiona el botón de Merki o di 'Oye Merki' en la caja.
-    - Licencia del Sistema:
-      Contraseña maestra de desbloqueo y renovación (60 días): Foreroyulian321.2026
+5. Asistente de Voz Inteligente Merki:
+   Presiona el botón de Merki en la caja o di 'Oye Merki'
+   para activar comandos rápidos por voz.
 
 ============================================================
 """
@@ -118,7 +112,7 @@ INSTRUCCIONES DE USO:
         f.write(readme_content)
 
 def build_zip():
-    print("[4/5] Comprimiendo paquete en formato .ZIP (compatible con WinRAR y Windows)...")
+    print("[4/5] Comprimiendo paquete en formato .ZIP...")
     with zipfile.ZipFile(ZIP_OUTPUT, 'w', zipfile.ZIP_DEFLATED) as zf:
         for root, dirs, files in os.walk(PACKAGE_FOLDER):
             for file in files:
