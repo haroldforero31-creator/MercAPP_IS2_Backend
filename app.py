@@ -100,7 +100,8 @@ from models import (
     db, Store, StoreSettings, User, Customer, CustomerEmailVerification, AuditLog,
     EmailVerification, PasswordReset, Category, Subcategory, Product,
     CashSession, Sale, SaleItem, CreditClient, CreditSale, CreditPayment,
-    Order, OrderItem, OrderNotification, AppLicense, EmailQueue
+    Order, OrderItem, OrderNotification, AppLicense, EmailQueue,
+    Supplier, PurchaseOrder, PurchaseOrderItem, SupplierInvoice
 )
 db.init_app(app)
 
@@ -845,6 +846,9 @@ def load_user(user_id):
     if str(user_id).startswith('customer_'):
         cid = int(str(user_id).split('_')[1])
         return db.session.get(Customer, cid)
+    if str(user_id).startswith('supplier_'):
+        sid = int(str(user_id).split('_')[1])
+        return db.session.get(Supplier, sid)
     user = db.session.get(User, int(user_id))
     if user:
         return user
@@ -999,10 +1003,22 @@ def validate_price(price_str):
 # ============================================================
 
 @app.route('/')
+@app.route('/landing')
 def index():
-    if current_user.is_authenticated:
-        return redirect(url_for('pos'))
-    return redirect(url_for('login'))
+    return render_template('landing.html')
+
+@app.route('/descargar-pos')
+@app.route('/download/mercapp-windows')
+def download_pos():
+    """Descarga directa del paquete ejecutable comprimido de MercAPP para Windows."""
+    rar_path = os.path.join(base_dir, 'MercAPP_IS2_Windows.rar')
+    zip_path = os.path.join(base_dir, 'MercAPP_IS2_Windows.zip')
+    if os.path.exists(rar_path):
+        return send_from_directory(base_dir, 'MercAPP_IS2_Windows.rar', as_attachment=True)
+    elif os.path.exists(zip_path):
+        return send_from_directory(base_dir, 'MercAPP_IS2_Windows.zip', as_attachment=True)
+    flash('El paquete descargable se está preparando. Por favor reintenta en breve.', 'info')
+    return redirect(url_for('index'))
 
 @app.route('/verify-admin', methods=['GET', 'POST'])
 @login_required
@@ -1535,6 +1551,89 @@ def customer_login_view():
             flash('Correo o contraseña incorrectos.', 'error')
             
     return render_template('customer_login.html')
+
+
+# ============================================================
+# SUPPLIER (PROVEEDOR) ROUTES & PORTAL
+# ============================================================
+
+@app.route('/p/login', methods=['GET', 'POST'])
+@app.route('/proveedor/login', endpoint='proveedor_login', methods=['GET', 'POST'])
+def proveedor_login_view():
+    if current_user.is_authenticated and isinstance(current_user, Supplier):
+        return redirect(url_for('proveedor_portal'))
+        
+    if request.method == 'POST':
+        email = (request.form.get('email') or '').strip().lower()
+        password = request.form.get('password', '')
+        supplier = Supplier.query.filter_by(email=email).first()
+        
+        if supplier and supplier.check_password(password):
+            if supplier.status != 'ACTIVO':
+                flash('Tu cuenta de proveedor se encuentra inactiva. Contacta al administrador del negocio.', 'error')
+                return render_template('proveedor_login.html')
+            login_user(supplier)
+            flash(f'¡Bienvenido al portal, {supplier.company_name}!', 'success')
+            return redirect(url_for('proveedor_portal'))
+        else:
+            flash('Credenciales de proveedor incorrectas. Verifica tu correo y contraseña.', 'error')
+            
+    return render_template('proveedor_login.html')
+
+
+@app.route('/p/logout')
+@app.route('/proveedor/logout', endpoint='proveedor_logout')
+@login_required
+def proveedor_logout():
+    logout_user()
+    flash('Has cerrado sesión del portal de proveedores.', 'info')
+    return redirect(url_for('proveedor_login'))
+
+
+@app.route('/p/portal')
+@app.route('/proveedor/portal', endpoint='proveedor_portal')
+@login_required
+def proveedor_portal():
+    if not isinstance(current_user, Supplier):
+        flash('Acceso exclusivo para proveedores autorizados.', 'error')
+        return redirect(url_for('proveedor_login'))
+    
+    orders = PurchaseOrder.query.filter_by(supplier_id=current_user.id).order_by(PurchaseOrder.created_at.desc()).all()
+    invoices = SupplierInvoice.query.filter_by(supplier_id=current_user.id).order_by(SupplierInvoice.due_date.asc()).all()
+    products = Product.query.filter_by(store_id=current_user.store_id, is_active=True).all()
+    
+    total_invoiced = sum(inv.total_amount for inv in invoices)
+    total_paid = sum(inv.paid_amount for inv in invoices)
+    total_pending = max(0, total_invoiced - total_paid)
+
+    return render_template(
+        'proveedor_portal.html',
+        supplier=current_user,
+        orders=orders,
+        invoices=invoices,
+        products=products,
+        total_invoiced=total_invoiced,
+        total_paid=total_paid,
+        total_pending=total_pending
+    )
+
+
+@app.route('/api/p/order/<int:order_id>/status', methods=['POST'])
+@login_required
+def api_update_supplier_order_status(order_id):
+    if not isinstance(current_user, Supplier):
+        return jsonify({'success': False, 'message': 'No autorizado'}), 403
+    order = db.session.get(PurchaseOrder, order_id)
+    if not order or order.supplier_id != current_user.id:
+        return jsonify({'success': False, 'message': 'Orden no encontrada'}), 404
+        
+    data = request.get_json() or {}
+    new_status = data.get('status')
+    if new_status in ['CONFIRMADA', 'EN_CAMINO', 'ENTREGADA', 'CANCELADA']:
+        order.status = new_status
+        db.session.commit()
+        return jsonify({'success': True, 'message': f'Estado actualizado a {new_status}'})
+    return jsonify({'success': False, 'message': 'Estado inválido'}), 400
 
 
 @app.route('/c/logout')
