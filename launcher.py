@@ -156,6 +156,14 @@ if __name__ == '__main__':
     # Initialize local SQLite DB
     init_local_database()
 
+    # Iniciar daemon de sincronización de correos pendientes (reintentos automáticos offline/online)
+    try:
+        from app import start_email_queue_sync_daemon
+        start_email_queue_sync_daemon()
+        print("[MERCAPP] Daemon de sincronización de reportes de correo iniciado.")
+    except Exception as e:
+        print(f"[MERCAPP] Advertencia al iniciar daemon de correos: {e}")
+
     # Launch server in background thread
     server_thread = threading.Thread(target=start_server, args=(port,), daemon=True)
     server_thread.start()

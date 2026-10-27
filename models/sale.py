@@ -191,3 +191,20 @@ class OrderNotification(db.Model):
     is_read = db.Column(db.Boolean, default=False, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.now)
 
+
+class EmailQueue(db.Model):
+    """Cola de correos salientes con soporte de reintento automático offline/online."""
+    __tablename__ = 'cola_correos'
+    id = db.Column(db.Integer, primary_key=True)
+    store_id = db.Column(db.Integer, nullable=True)
+    recipient = db.Column(db.String(150), nullable=False)
+    subject = db.Column(db.String(200), nullable=False)
+    html_body = db.Column(db.Text, nullable=False)
+    email_type = db.Column(db.String(50), default='cierre_caja')
+    status = db.Column(db.String(20), default='pending')  # pending, sent, failed
+    attempts = db.Column(db.Integer, default=0)
+    last_error = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    sent_at = db.Column(db.DateTime, nullable=True)
+
+

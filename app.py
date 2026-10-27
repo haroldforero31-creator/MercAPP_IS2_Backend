@@ -10,7 +10,7 @@ from functools import wraps
 from PIL import Image
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-import os, sys, re, io, csv, secrets, difflib, random, time
+import os, sys, re, io, csv, secrets, difflib, random, time, socket, threading
 
 try:
     import serial
@@ -100,7 +100,7 @@ from models import (
     db, Store, StoreSettings, User, Customer, CustomerEmailVerification, AuditLog,
     EmailVerification, PasswordReset, Category, Subcategory, Product,
     CashSession, Sale, SaleItem, CreditClient, CreditSale, CreditPayment,
-    Order, OrderItem, OrderNotification, AppLicense
+    Order, OrderItem, OrderNotification, AppLicense, EmailQueue
 )
 db.init_app(app)
 
@@ -543,6 +543,296 @@ def send_credit_payment_receipt(client, payment, previous_debt):
     except Exception as e:
         print(f"[MAIL] Error enviando recibo de abono a {client.email}: {e}")
         return False
+
+
+def check_internet_connection(timeout=2.0):
+    """Comprueba de forma rápida si el equipo tiene acceso a internet."""
+    try:
+        server = app.config.get('MAIL_SERVER', 'smtp.gmail.com')
+        port = int(app.config.get('MAIL_PORT', 587))
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((server, port))
+        sock.close()
+        return True
+    except Exception:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect(('8.8.8.8', 53))
+            sock.close()
+            return True
+        except Exception:
+            return False
+
+
+def process_email_queue():
+    """Procesa los correos pendientes en la cola local si existe conexión a internet."""
+    with app.app_context():
+        try:
+            if not check_internet_connection():
+                return 0
+            pending_items = EmailQueue.query.filter_by(status='pending').order_by(EmailQueue.created_at.asc()).all()
+            if not pending_items:
+                return 0
+            sent_count = 0
+            for item in pending_items:
+                try:
+                    msg = Message(
+                        subject=item.subject,
+                        recipients=[item.recipient]
+                    )
+                    msg.html = item.html_body
+                    mail.send(msg)
+                    item.status = 'sent'
+                    item.sent_at = datetime.now()
+                    item.last_error = None
+                    sent_count += 1
+                except Exception as e:
+                    item.attempts = (item.attempts or 0) + 1
+                    item.last_error = str(e)
+                    if item.attempts >= 25:
+                        item.status = 'failed'
+            db.session.commit()
+            if sent_count > 0:
+                print(f"[EMAIL QUEUE] Sincronización exitosa: {sent_count} reporte(s) enviado(s) correctamente.")
+            return sent_count
+        except Exception as e:
+            print(f"[EMAIL QUEUE] Error procesando cola de correos: {e}")
+            return 0
+
+
+def generate_closing_report_html(active_session, store, admin, stats):
+    """Genera plantilla HTML ejecutiva de alta gama para el reporte de cierre de caja y ventas."""
+    store_name = store.name if store else "MercAPP Supermercado"
+    cajero_name = stats.get('cajero_name', 'Cajero')
+    admin_name = admin.name if admin else 'Administrador'
+    
+    opened_at_str = stats.get('opened_at_str', '')
+    closed_at_str = stats.get('closed_at_str', '')
+    
+    total_sales_cop = format_cop(stats.get('total_sales', 0))
+    total_tickets = stats.get('total_tickets', 0)
+    avg_ticket_cop = format_cop(stats.get('avg_ticket', 0))
+    
+    opening_base_cop = format_cop(stats.get('opening_base', 0))
+    cash_sales_cop = format_cop(stats.get('cash_sales', 0))
+    card_sales_cop = format_cop(stats.get('card_sales', 0))
+    transfer_sales_cop = format_cop(stats.get('transfer_sales', 0))
+    credit_sales_cop = format_cop(stats.get('credit_sales', 0))
+    
+    expected_cash_cop = format_cop(stats.get('expected_cash', 0))
+    actual_cash_cop = format_cop(stats.get('actual_cash', 0))
+    diff = stats.get('diff', 0)
+    diff_abs_cop = format_cop(abs(diff))
+    
+    if diff == 0:
+        diff_badge_text = "CUADRE EXACTO ($0)"
+        diff_badge_bg = "rgba(46, 125, 50, 0.2)"
+        diff_badge_color = "#4CAF50"
+        diff_desc = "El dinero contado en caja coincide exactamente con el monto calculado por el sistema."
+    elif diff > 0:
+        diff_badge_text = f"SOBRANTE DE CAJA (+{diff_abs_cop})"
+        diff_badge_bg = "rgba(33, 150, 243, 0.2)"
+        diff_badge_color = "#64B5F6"
+        diff_desc = f"Hay un excedente de {diff_abs_cop} en la caja física respecto a lo registrado."
+    else:
+        diff_badge_text = f"FALTANTE DE CAJA (-{diff_abs_cop})"
+        diff_badge_bg = "rgba(244, 67, 54, 0.2)"
+        diff_badge_color = "#E57373"
+        diff_desc = f"Se detectó un faltante de dinero en caja de {diff_abs_cop}. Por favor verificar recibos."
+
+    return f"""
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 650px; margin: 0 auto; background: #0E121D; color: #E8EAED; border-radius: 16px; overflow: hidden; border: 1px solid #232A3B; box-shadow: 0 16px 40px rgba(0,0,0,0.6);">
+        <!-- Header con gradiente empresarial -->
+        <div style="background: linear-gradient(135deg, #0B3C5D, #1D2731, #E57E25); padding: 28px 24px; text-align: center; border-bottom: 2px solid #FFA726;">
+            <div style="display: inline-block; background: rgba(255,167,38,0.15); color: #FFA726; font-size: 0.8rem; font-weight: 800; letter-spacing: 2px; text-transform: uppercase; padding: 4px 12px; border-radius: 20px; margin-bottom: 8px;">
+                MERCAPP IS2 &bull; CONTROL DE VENTAS
+            </div>
+            <h1 style="margin: 0; font-size: 1.85rem; color: #FFFFFF; font-weight: 800; letter-spacing: 0.5px;">{store_name}</h1>
+            <p style="margin: 6px 0 0; color: #E0E0E0; font-size: 1rem; font-weight: 500;">
+                Reporte Oficial de Cierre de Caja & Arqueo Diario
+            </p>
+        </div>
+
+        <div style="padding: 24px;">
+            <p style="font-size: 1rem; margin-top: 0; color: #B0B8C4;">
+                Estimado(a) <strong>{admin_name}</strong>,<br>
+                Se ha completado el cierre de la jornada de caja. A continuación se presentan las cifras financieras y el balance oficial de cuadre:
+            </p>
+
+            <!-- Metadata de Sesión -->
+            <div style="background: rgba(255,255,255,0.02); border: 1px solid #222B3D; border-radius: 12px; padding: 14px 18px; margin-bottom: 20px;">
+                <table style="width: 100%; border-collapse: collapse; font-size: 0.85rem;">
+                    <tr>
+                        <td style="padding: 4px 0; color: #8C9BAE;">Cajero responsable: <strong style="color: #FFFFFF;">{cajero_name}</strong></td>
+                        <td style="padding: 4px 0; color: #8C9BAE; text-align: right;">Apertura: <strong style="color: #FFFFFF;">{opened_at_str}</strong></td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 4px 0; color: #8C9BAE;">Fecha de Cierre: <strong style="color: #FFFFFF;">{closed_at_str}</strong></td>
+                        <td style="padding: 4px 0; color: #8C9BAE; text-align: right;">Estado: <strong style="color: #81C784;">Cerrada y Auditada</strong></td>
+                    </tr>
+                </table>
+            </div>
+
+            <!-- Resumen Destacado en 3 Tarjetas -->
+            <table style="width: 100%; border-collapse: separate; border-spacing: 10px 0; margin-bottom: 20px;">
+                <tr>
+                    <td style="background: rgba(255, 167, 38, 0.08); border: 1px solid rgba(255, 167, 38, 0.3); border-radius: 12px; padding: 16px; text-align: center; width: 33%;">
+                        <div style="font-size: 0.75rem; color: #FFA726; text-transform: uppercase; font-weight: 700;">Total Ventas</div>
+                        <div style="font-size: 1.35rem; font-weight: 900; color: #FFFFFF; margin-top: 4px;">{total_sales_cop}</div>
+                        <div style="font-size: 0.75rem; color: #8C9BAE; margin-top: 4px;">{total_tickets} tickets emitidos</div>
+                    </td>
+                    <td style="background: rgba(76, 175, 80, 0.08); border: 1px solid rgba(76, 175, 80, 0.3); border-radius: 12px; padding: 16px; text-align: center; width: 33%;">
+                        <div style="font-size: 0.75rem; color: #81C784; text-transform: uppercase; font-weight: 700;">Efectivo en Caja</div>
+                        <div style="font-size: 1.35rem; font-weight: 900; color: #FFFFFF; margin-top: 4px;">{actual_cash_cop}</div>
+                        <div style="font-size: 0.75rem; color: #8C9BAE; margin-top: 4px;">Base + Efectivo</div>
+                    </td>
+                    <td style="background: {diff_badge_bg}; border: 1px solid {diff_badge_color}; border-radius: 12px; padding: 16px; text-align: center; width: 33%;">
+                        <div style="font-size: 0.75rem; color: {diff_badge_color}; text-transform: uppercase; font-weight: 700;">Resultado Cuadre</div>
+                        <div style="font-size: 1.15rem; font-weight: 900; color: {diff_badge_color}; margin-top: 4px;">{diff_badge_text}</div>
+                        <div style="font-size: 0.75rem; color: #8C9BAE; margin-top: 4px;">Ticket prom: {avg_ticket_cop}</div>
+                    </td>
+                </tr>
+            </table>
+
+            <!-- Desglose de Medios de Pago -->
+            <div style="margin-bottom: 20px;">
+                <h3 style="font-size: 0.95rem; color: #FFA726; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px;">
+                    💳 Desglose por Métodos de Pago
+                </h3>
+                <table style="width: 100%; border-collapse: collapse; background: #151B28; border-radius: 10px; overflow: hidden; border: 1px solid #232A3B;">
+                    <thead>
+                        <tr style="background: #1B2335; border-bottom: 2px solid #2D374D; color: #8C9BAE; font-size: 0.8rem; text-transform: uppercase;">
+                            <th style="padding: 10px 14px; text-align: left;">Método</th>
+                            <th style="padding: 10px 14px; text-align: right;">Total Recaudado</th>
+                        </tr>
+                    </thead>
+                    <tbody style="font-size: 0.9rem;">
+                        <tr style="border-bottom: 1px solid #1F2739;">
+                            <td style="padding: 10px 14px; color: #FFFFFF;">💵 Ventas en Efectivo</td>
+                            <td style="padding: 10px 14px; text-align: right; color: #FFFFFF; font-weight: 600;">{cash_sales_cop}</td>
+                        </tr>
+                        <tr style="border-bottom: 1px solid #1F2739;">
+                            <td style="padding: 10px 14px; color: #FFFFFF;">💳 Ventas con Tarjeta (Datáfono)</td>
+                            <td style="padding: 10px 14px; text-align: right; color: #FFFFFF; font-weight: 600;">{card_sales_cop}</td>
+                        </tr>
+                        <tr style="border-bottom: 1px solid #1F2739;">
+                            <td style="padding: 10px 14px; color: #FFFFFF;">📲 Transferencias (Nequi / Daviplata / Bancos)</td>
+                            <td style="padding: 10px 14px; text-align: right; color: #FFFFFF; font-weight: 600;">{transfer_sales_cop}</td>
+                        </tr>
+                        <tr style="border-bottom: 1px solid #1F2739;">
+                            <td style="padding: 10px 14px; color: #FFFFFF;">📝 Ventas Fiadas (Crédito a Clientes)</td>
+                            <td style="padding: 10px 14px; text-align: right; color: #FFA726; font-weight: 600;">{credit_sales_cop}</td>
+                        </tr>
+                        <tr style="background: rgba(255,167,38,0.06); font-weight: bold; font-size: 1rem;">
+                            <td style="padding: 12px 14px; color: #FFA726;">TOTAL FACTURADO DEL DÍA</td>
+                            <td style="padding: 12px 14px; text-align: right; color: #FFA726;">{total_sales_cop}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Auditoría de Arqueo Físico de Caja -->
+            <div style="background: #151B28; border: 1px solid #232A3B; border-radius: 12px; padding: 18px; margin-bottom: 20px;">
+                <h3 style="font-size: 0.95rem; color: #81C784; text-transform: uppercase; letter-spacing: 1px; margin-top: 0; margin-bottom: 12px;">
+                    💰 Arqueo y Conciliación Física de Efectivo
+                </h3>
+                <table style="width: 100%; font-size: 0.9rem; line-height: 1.8;">
+                    <tr>
+                        <td style="color: #8C9BAE;">(+) Base Inicial de Apertura:</td>
+                        <td style="text-align: right; color: #FFFFFF; font-weight: 600;">{opening_base_cop}</td>
+                    </tr>
+                    <tr>
+                        <td style="color: #8C9BAE;">(+) Ventas Cobradas en Efectivo:</td>
+                        <td style="text-align: right; color: #FFFFFF; font-weight: 600;">{cash_sales_cop}</td>
+                    </tr>
+                    <tr style="border-top: 1px solid #232A3B;">
+                        <td style="color: #FFA726; font-weight: bold; padding-top: 6px;">(=) Efectivo Total Esperado en Gaveta:</td>
+                        <td style="text-align: right; color: #FFA726; font-weight: bold; padding-top: 6px;">{expected_cash_cop}</td>
+                    </tr>
+                    <tr>
+                        <td style="color: #81C784; font-weight: bold;">(✓) Efectivo Real Contado por el Cajero:</td>
+                        <td style="text-align: right; color: #81C784; font-weight: bold; font-size: 1.05rem;">{actual_cash_cop}</td>
+                    </tr>
+                    <tr style="border-top: 2px solid #232A3B;">
+                        <td style="color: {diff_badge_color}; font-weight: 800; padding-top: 8px;">Diferencia de Arqueo (Cuadre):</td>
+                        <td style="text-align: right; color: {diff_badge_color}; font-weight: 800; font-size: 1.15rem; padding-top: 8px;">
+                            {"+ " if diff > 0 else ""}{format_cop(diff)}
+                        </td>
+                    </tr>
+                </table>
+                <p style="margin: 12px 0 0; font-size: 0.8rem; color: #8C9BAE; border-top: 1px dashed #232A3B; padding-top: 8px;">
+                    <em>{diff_desc}</em>
+                </p>
+            </div>
+
+            <!-- Nota de auditoría -->
+            <div style="background: rgba(255,255,255,0.02); border-left: 4px solid #FFA726; border-radius: 4px; padding: 10px 14px; font-size: 0.8rem; color: #8C9BAE; line-height: 1.4;">
+                <strong style="color: #FFA726;">Nota del Sistema:</strong> Este reporte fue generado y auditado automáticamente por MercAPP en el momento en que se cerró la caja registradora. Cuenta con respaldo inmutable en el registro de auditoría local.
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div style="background: #080A10; padding: 16px; text-align: center; font-size: 0.75rem; color: #5F6878; border-top: 1px solid #1A202C;">
+            MercAPP IS2 &bull; Sistema Autónomo de Punto de Venta para Supermercados<br>
+            Generado automáticamente el {closed_at_str}
+        </div>
+    </div>
+    """
+
+
+def queue_cash_closing_email(active_session, stats):
+    """Encola el reporte de cierre de caja en la base de datos y dispara el envío en segundo plano."""
+    try:
+        admin_user = User.query.filter_by(store_id=active_session.store_id, is_admin=True).order_by(User.id.asc()).first()
+        recipient_email = admin_user.email if admin_user and admin_user.email else None
+        
+        if not recipient_email:
+            print("[EMAIL QUEUE] No se encontró usuario administrador con correo para esta tienda.")
+            return False
+            
+        store = db.session.get(Store, active_session.store_id)
+        store_name = store.name if store else "MercAPP"
+        
+        date_str = active_session.closed_at.strftime('%d/%m/%Y') if active_session.closed_at else datetime.now().strftime('%d/%m/%Y')
+        subject = f"📊 Reporte de Cierre de Caja & Ventas - {store_name} ({date_str})"
+        
+        html_body = generate_closing_report_html(active_session, store, admin_user, stats)
+        
+        queue_item = EmailQueue(
+            store_id=active_session.store_id,
+            recipient=recipient_email,
+            subject=subject,
+            html_body=html_body,
+            email_type='cierre_caja',
+            status='pending',
+            created_at=datetime.now()
+        )
+        db.session.add(queue_item)
+        db.session.commit()
+        
+        print(f"[EMAIL QUEUE] Reporte de cierre de caja encolado con ID {queue_item.id} para {recipient_email}")
+        
+        # Intentar enviar inmediatamente en segundo plano
+        threading.Thread(target=process_email_queue, daemon=True).start()
+        return True
+    except Exception as e:
+        print(f"[EMAIL QUEUE] Error al encolar correo de cierre de caja: {e}")
+        return False
+
+
+def start_email_queue_sync_daemon():
+    """Daemon en segundo plano que revisa periódicamente la cola para reenviar correos al recuperar internet."""
+    def worker():
+        while True:
+            try:
+                time.sleep(35)
+                process_email_queue()
+            except Exception:
+                pass
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
 
 
 
@@ -2958,7 +3248,31 @@ def session_close():
             diff = actual - expected_cash
             diff_text = f"+{format_cop(diff)}" if diff >= 0 else f"-{format_cop(abs(diff))}"
             log_audit('CASH_SESSION_CLOSE', f'Caja cerrada. Recuento: {format_cop(actual)}, Esperado: {format_cop(expected_cash)}, Diferencia: {diff_text}', current_user.id)
-            flash(f'Caja cerrada exitosamente. Diferencia: {diff_text}', 'success')
+            
+            # Encolar y enviar reporte oficial al correo del administrador (con soporte offline/online)
+            total_sales_val = sum(s.total for s in sales_in_session)
+            credit_sales = sum(s.total for s in sales_in_session if s.payment_method == 'fiado')
+            avg_ticket = int(total_sales_val / len(sales_in_session)) if sales_in_session else 0
+            
+            closing_stats = {
+                'cajero_name': current_user.name,
+                'opened_at_str': active_session.opened_at.strftime('%d/%m/%Y %I:%M %p') if active_session.opened_at else 'N/A',
+                'closed_at_str': active_session.closed_at.strftime('%d/%m/%Y %I:%M %p'),
+                'total_sales': total_sales_val,
+                'total_tickets': len(sales_in_session),
+                'avg_ticket': avg_ticket,
+                'opening_base': active_session.base_amount,
+                'cash_sales': cash,
+                'card_sales': card,
+                'transfer_sales': transfer,
+                'credit_sales': credit_sales,
+                'expected_cash': expected_cash,
+                'actual_cash': actual,
+                'diff': diff
+            }
+            queue_cash_closing_email(active_session, closing_stats)
+
+            flash(f'Caja cerrada exitosamente. Diferencia: {diff_text}. El reporte fue enviado al correo del administrador.', 'success')
             return redirect(url_for('session_history'))
         except ValueError:
             flash('Monto de recuento inválido', 'error')
@@ -4993,5 +5307,6 @@ if __name__ == '__main__':
                     db.session.add(cat)
             db.session.commit()
             print(f"[SEED] Categorías por defecto creadas para {len(stores_without_cats)} tienda(s).")
+        start_email_queue_sync_daemon()
         
     app.run(debug=True, port=5001)
