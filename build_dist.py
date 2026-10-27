@@ -109,6 +109,8 @@ INSTRUCCIONES DE USO:
      Email: tu correo registrado o configurado
    - Asistente de Voz Merki:
      Presiona el botón de Merki o di 'Oye Merki' en la caja.
+    - Licencia del Sistema:
+      Contraseña maestra de desbloqueo y renovación (60 días): Foreroyulian321.2026
 
 ============================================================
 """

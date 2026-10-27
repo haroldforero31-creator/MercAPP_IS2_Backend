@@ -52,6 +52,15 @@ def init_local_database():
                         conn.commit()
                     except Exception:
                         pass
+            
+            # Inicializar licencia si no existe (bloqueo en primer uso tal como en MercAPP original)
+            from models import AppLicense
+            from datetime import datetime
+            if not AppLicense.query.first():
+                initial_license = AppLicense(expiration_date=datetime(2000, 1, 1), last_time_checked=datetime.now())
+                db.session.add(initial_license)
+                db.session.commit()
+
             print("[MERCAPP] Base de datos verificada y lista.")
         except Exception as e:
             print(f"[MERCAPP] Advertencia durante inicio de base de datos: {e}")

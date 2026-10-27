@@ -78,7 +78,7 @@ from models import (
     db, Store, StoreSettings, User, Customer, CustomerEmailVerification, AuditLog,
     EmailVerification, PasswordReset, Category, Subcategory, Product,
     CashSession, Sale, SaleItem, CreditClient, CreditSale, CreditPayment,
-    Order, OrderItem, OrderNotification
+    Order, OrderItem, OrderNotification, AppLicense
 )
 db.init_app(app)
 login_manager = LoginManager(app)
@@ -997,6 +997,36 @@ def reset_password(token):
 # CUSTOMER STOREFRONT & ORDERS (B2C)
 # ====================================================================
 
+# ============================================================
+# LICENSING SYSTEM
+# ============================================================
+@app.before_request
+def check_license():
+    # Allow static files, license endpoints, sync and error handlers
+    if request.endpoint in ['static', 'license', 'api_renovar_licencia', 'api_sync_status', 'internal_error', 'handle_exception']:
+        return
+    
+    try:
+        license_record = AppLicense.query.first()
+        if license_record:
+            now = datetime.now()
+            
+            # Anti-tamper: if system clock is older than our last check, user moved time backward
+            if license_record.last_time_checked and now < license_record.last_time_checked:
+                flash('El reloj del sistema es incorrecto (fecha anterior a la esperada). Por favor ajusta la hora de Windows.', 'error')
+                return redirect(url_for('license'))
+            
+            if now > license_record.expiration_date:
+                return redirect(url_for('license'))
+                
+            # Update last_time_checked every hour to save DB writes but keep track of time
+            if not license_record.last_time_checked or (now - license_record.last_time_checked).total_seconds() > 3600:
+                license_record.last_time_checked = now
+                db.session.commit()
+    except Exception:
+        pass  # If DB isn't initialized yet
+
+
 @app.before_request
 def restrict_customer_access():
     """Restringir acceso para que clientes solo vean rutas de tienda/pedidos y administradores vean el POS."""
@@ -1555,7 +1585,61 @@ def logout():
 @admin_only
 def settings():
     """Centro de Control (Configuración General)."""
-    return render_template('config_hub.html')
+    license_record = AppLicense.query.first()
+    days_left = 0
+    if license_record:
+        delta = license_record.expiration_date - datetime.now()
+        days_left = max(0, delta.days)
+    return render_template('config_hub.html', license_record=license_record, days_left=days_left)
+
+
+@app.route('/licencia', methods=['GET', 'POST'])
+def license():
+    license_record = AppLicense.query.first()
+    if not license_record:
+        # Failsafe: lock on first run
+        license_record = AppLicense(expiration_date=datetime(2000, 1, 1), last_time_checked=datetime.now())
+        db.session.add(license_record)
+        db.session.commit()
+        
+    now = datetime.now()
+    is_expired = now > license_record.expiration_date
+    is_clock_wrong = license_record.last_time_checked and now < license_record.last_time_checked
+    
+    if not is_expired and not is_clock_wrong and request.method == 'GET':
+        return redirect(url_for('pos'))
+
+    if request.method == 'POST':
+        password = request.form.get('password')
+        if password == 'Foreroyulian321.2026':
+            license_record.expiration_date = datetime.now() + timedelta(days=60)
+            db.session.commit()
+            flash('Licencia activada por 60 días más.', 'success')
+            return redirect(url_for('pos'))
+        else:
+            flash('Contraseña de desbloqueo incorrecta.', 'error')
+            
+    return render_template('licencia.html')
+
+
+@app.route('/api/renovar-licencia', methods=['POST'])
+@login_required
+def api_renovar_licencia():
+    password = request.form.get('password')
+    if password == 'Foreroyulian321.2026':
+        license_record = AppLicense.query.first()
+        if not license_record:
+            license_record = AppLicense(expiration_date=datetime.now() + timedelta(days=60), last_time_checked=datetime.now())
+            db.session.add(license_record)
+        else:
+            license_record.expiration_date = datetime.now() + timedelta(days=60)
+        db.session.commit()
+        flash('Licencia renovada exitosamente por 60 días más desde hoy.', 'success')
+    else:
+        flash('Contraseña de renovación incorrecta.', 'error')
+    
+    return redirect(url_for('settings'))
+
 
 
 @app.route('/dashboard')
@@ -4742,6 +4826,12 @@ def api_sync_status():
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
+        
+        # Initialize License if missing (lock immediately on first run)
+        if not AppLicense.query.first():
+            initial_license = AppLicense(expiration_date=datetime(2000, 1, 1), last_time_checked=datetime.now())
+            db.session.add(initial_license)
+            db.session.commit()
         
         # Migración segura: agregar columnas si no existen en base de datos SQLite existente
         try:

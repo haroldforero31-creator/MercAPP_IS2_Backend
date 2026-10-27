@@ -150,3 +150,11 @@ class PasswordReset(db.Model):
     used = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.now)
     user = db.relationship('User', backref='password_resets')
+
+
+class AppLicense(db.Model):
+    __tablename__ = 'app_license'
+    id = db.Column(db.Integer, primary_key=True)
+    expiration_date = db.Column(db.DateTime, nullable=False)
+    last_time_checked = db.Column(db.DateTime, nullable=True)
+
