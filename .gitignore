@@ -6,3 +6,9 @@ __pycache__/
 mercapp.db
 uploads/
 .env
+dist_package/
+dist/
+build/
+*.zip
+*.rar
+logs/

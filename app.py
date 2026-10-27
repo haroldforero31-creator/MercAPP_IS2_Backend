@@ -8,7 +8,7 @@ from functools import wraps
 from PIL import Image
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-import os, re, io, csv, secrets, difflib, random
+import os, sys, re, io, csv, secrets, difflib, random
 
 try:
     import serial
@@ -19,12 +19,33 @@ try:
 except ImportError:
     HW_AVAILABLE = False
 
-# Configuramos las rutas para que Flask busque el HTML en la carpeta FRONTEND
-base_dir = os.path.abspath(os.path.dirname(__file__))
-dotenv_path = os.path.join(base_dir, '.env')
-load_dotenv(dotenv_path)
+# Configuramos las rutas compatibles con Desarrollo, Carpetas Distribuidas y Ejecutables Congelados (PyInstaller)
+if getattr(sys, 'frozen', False):
+    base_dir = os.path.dirname(sys.executable)
+    bundle_dir = getattr(sys, '_MEIPASS', base_dir)
+    cand_frontend = os.path.join(bundle_dir, 'MercAPP_IS2_Frontend')
+    if os.path.exists(cand_frontend):
+        frontend_dir = cand_frontend
+    elif os.path.exists(os.path.join(bundle_dir, 'templates')):
+        frontend_dir = bundle_dir
+    elif os.path.exists(os.path.join(base_dir, 'MercAPP_IS2_Frontend')):
+        frontend_dir = os.path.join(base_dir, 'MercAPP_IS2_Frontend')
+    else:
+        frontend_dir = base_dir
+else:
+    base_dir = os.path.abspath(os.path.dirname(__file__))
+    sibling_frontend = os.path.abspath(os.path.join(base_dir, '..', 'MercAPP_IS2_Frontend'))
+    if os.path.exists(sibling_frontend):
+        frontend_dir = sibling_frontend
+    elif os.path.exists(os.path.join(base_dir, 'MercAPP_IS2_Frontend')):
+        frontend_dir = os.path.abspath(os.path.join(base_dir, 'MercAPP_IS2_Frontend'))
+    else:
+        frontend_dir = base_dir
 
-frontend_dir = os.path.abspath(os.path.join(base_dir, '..', 'MercAPP_IS2_Frontend'))
+dotenv_path = os.path.join(base_dir, '.env')
+if os.path.exists(dotenv_path):
+    load_dotenv(dotenv_path)
+
 UPLOAD_DIR = os.path.join(base_dir, 'uploads')
 os.makedirs(os.path.join(UPLOAD_DIR, 'products'), exist_ok=True)
 os.makedirs(os.path.join(UPLOAD_DIR, 'categories'), exist_ok=True)
@@ -641,8 +662,25 @@ def validate_price(price_str):
 @app.route('/')
 def index():
     if current_user.is_authenticated:
-        return redirect(url_for('settings'))
+        return redirect(url_for('pos'))
     return redirect(url_for('login'))
+
+@app.route('/verify-admin', methods=['GET', 'POST'])
+@login_required
+def verify_admin():
+    """Doble confirmación con contraseña de administrador antes de entrar a zonas críticas."""
+    next_url = request.args.get('next') or url_for('settings')
+    
+    if request.method == 'POST':
+        password = request.form.get('password', '')
+        if current_user.check_password(password):
+            session['admin_unlocked'] = True
+            session.permanent = True
+            return redirect(next_url)
+        else:
+            flash('Contraseña de seguridad incorrecta. Acceso denegado.', 'error')
+            
+    return render_template('verificar_admin.html', next=next_url)
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -2291,6 +2329,34 @@ def api_bulk_price():
         return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
 
 
+@app.route('/api/cleanup/custom-products', methods=['POST'])
+@login_required
+@admin_only
+def api_cleanup_custom_products():
+    """Eliminar productos personalizados (__CUSTOM__) huérfanos con más de 30 días sin ventas asociadas."""
+    try:
+        cutoff = datetime.now() - timedelta(days=30)
+        old_custom = Product.query.filter(
+            Product.store_id == current_user.store_id,
+            Product.barcode == '__CUSTOM__',
+            Product.created_at < cutoff
+        ).all()
+        
+        deleted = 0
+        for p in old_custom:
+            has_sales = SaleItem.query.filter_by(product_id=p.id).first()
+            if not has_sales:
+                db.session.delete(p)
+                deleted += 1
+                
+        db.session.commit()
+        return jsonify({'success': True, 'deleted': deleted, 'message': f'{deleted} productos temporales eliminados.'})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
+
+
+
 # ============================================================
 # ROUTES — CATEGORY MANAGEMENT
 # ============================================================
@@ -3850,10 +3916,12 @@ def debt_client_invoice(client_id):
 from controllers.user_controller import user_controller
 from controllers.product_controller import product_controller
 from controllers.sale_controller import sale_controller
+from controllers.merki_controller import merki_controller
 
 app.register_blueprint(user_controller)
 app.register_blueprint(product_controller)
 app.register_blueprint(sale_controller)
+app.register_blueprint(merki_controller)
 
 
 # ============================================================
@@ -4400,6 +4468,50 @@ def read_weight_from_port(port, timeout=2):
     return None
 
 
+@app.route('/api/hardware/scale-debug', methods=['GET'])
+@login_required
+def api_hardware_scale_debug():
+    """Deep diagnostic for scale connection — tries all ports with all baud rates and logs raw data."""
+    if not HW_AVAILABLE:
+        return jsonify({'success': False, 'message': 'Hardware nativo no disponible en este entorno.'}), 501
+    
+    import time as _time
+    available_ports = serial.tools.list_ports.comports()
+    results = []
+    
+    for p in available_ports:
+        port_result = {'device': p.device, 'description': p.description, 'hwid': getattr(p, 'hwid', ''), 'bauds': {}}
+        for baud in [9600, 4800, 2400, 19200]:
+            baud_result = {'raw_data': [], 'error': None, 'bytes_waiting': 0}
+            ser = None
+            try:
+                ser = serial.Serial(p.device, baudrate=baud, timeout=2,
+                                    bytesize=serial.EIGHTBITS,
+                                    parity=serial.PARITY_NONE,
+                                    stopbits=serial.STOPBITS_ONE)
+                ser.reset_input_buffer()
+                try:
+                    ser.write(b'\x05')
+                    _time.sleep(0.1)
+                    ser.write(b'P\r\n')
+                    _time.sleep(0.1)
+                except Exception:
+                    pass
+                _time.sleep(0.3)
+                if ser.in_waiting > 0:
+                    data = ser.read(ser.in_waiting)
+                    baud_result['raw_data'].append(str(data))
+                    baud_result['bytes_waiting'] = len(data)
+                ser.close()
+            except Exception as e:
+                baud_result['error'] = str(e)
+                if ser and ser.is_open:
+                    ser.close()
+            port_result['bauds'][baud] = baud_result
+        results.append(port_result)
+    return jsonify({'success': True, 'ports': results})
+
+
 @app.route('/api/hardware/web-serial-config', methods=['GET'])
 @login_required
 def api_web_serial_config():
@@ -4427,6 +4539,18 @@ def api_web_serial_config():
             'cut': [29, 86, 66, 0]
         },
         'hw_native_available': HW_AVAILABLE
+    })
+
+
+@app.route('/api/sync/status', methods=['GET'])
+def api_sync_status():
+    """Retorna estado de conexión y disponibilidad de la base de datos local."""
+    return jsonify({
+        'status': 'ok',
+        'mode': 'offline-first',
+        'database': 'sqlite-local',
+        'timestamp': datetime.now().isoformat(),
+        'synchronized': True
     })
 
 
