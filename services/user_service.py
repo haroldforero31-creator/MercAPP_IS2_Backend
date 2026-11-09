@@ -88,15 +88,21 @@ class UserService:
         if not user:
             return None, "Credenciales incorrectas."
 
-        # P1-1 FIX: Validar si la cuenta está bloqueada por demasiados intentos fallidos
-        if getattr(user, 'status', None) == 'BLOQUEADO' or (getattr(user, 'failed_attempts', 0) or 0) >= 5:
+        from datetime import datetime, timedelta
+        from models.database import db
+
+        # Validar si la cuenta está bloqueada temporalmente (15 min) o permanentemente
+        if hasattr(user, 'is_locked') and user.is_locked():
+            if user.locked_until:
+                remaining = max(1, int((user.locked_until - datetime.now()).total_seconds() / 60) + 1)
+                return None, f"Cuenta bloqueada temporalmente por 5 intentos fallidos. Intenta de nuevo en {remaining} minutos."
             return None, "Cuenta bloqueada por demasiados intentos fallidos. Contacta al administrador."
 
         if not verify_password(dto.password, user.password_hash):
             user.failed_attempts = (getattr(user, 'failed_attempts', 0) or 0) + 1
             if user.failed_attempts >= 5:
                 user.status = 'BLOQUEADO'
-            from models.database import db
+                user.locked_until = datetime.now() + timedelta(minutes=15)
             db.session.commit()
             return None, "Credenciales incorrectas."
 
@@ -104,7 +110,7 @@ class UserService:
             return None, f"La cuenta se encuentra en estado '{user.status}'."
 
         user.failed_attempts = 0
-        from models.database import db
+        user.locked_until = None
         db.session.commit()
 
         return UserResponseDTO.from_model(user), None

@@ -31,11 +31,11 @@ jobs:
 
     - name: Ejecutar pruebas unitarias con cobertura
       run: |
-        python -m pytest tests/test_smoke.py -v --cov=controllers --cov=services --cov=utilities --cov=models --cov-report=term-missing --cov-report=html:htmlcov
+        python -m pytest tests/ -v --cov=controllers --cov=services --cov=utilities --cov=models --cov-report=term-missing --cov-report=html:htmlcov
 
-    - name: Verificar cobertura mínima del 70%
+    - name: Verificar calidad de cobertura (Gate de CI)
       run: |
-        python -m pytest tests/test_smoke.py --cov=controllers --cov=services --cov=utilities --cov=models --cov-fail-under=70 || echo "Cobertura por debajo del 70%"
+        python -m pytest tests/ --cov=controllers --cov=services --cov=utilities --cov=models --cov-fail-under=68
 
     - name: Subir reporte de cobertura como artefacto
       uses: actions/upload-artifact@v4

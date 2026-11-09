@@ -1,6 +1,6 @@
 -- ============================================================
 -- MercAPP — Procedimientos Almacenados y Triggers
--- Compatible con MySQL 8.0+ / TiDB Cloud
+-- Compatible con MySQL 8.0+ / MariaDB 10.5+
 -- Criterio H de Sustentación: 5 SPs + 5 Triggers funcionales
 -- ============================================================
 
@@ -9,8 +9,9 @@
 -- ============================================================
 
 -- SP1: Registrar venta POS con descuento atómico de stock
+DROP PROCEDURE IF EXISTS sp_registrar_venta_pos;
 DELIMITER //
-CREATE PROCEDURE IF NOT EXISTS sp_registrar_venta_pos(
+CREATE PROCEDURE sp_registrar_venta_pos(
     IN p_store_id INT,
     IN p_user_id INT,
     IN p_cash_session_id INT,
@@ -38,8 +39,8 @@ BEGIN
 
     SET v_total = p_quantity * p_unit_price;
 
-    INSERT INTO venta (store_id, cash_session_id, receipt_number, user_id, subtotal, total, payment_method, amount_received, change_given, status)
-    VALUES (p_store_id, p_cash_session_id, p_receipt_number, p_user_id, v_total, v_total, p_payment_method, p_amount_received, p_amount_received - v_total, 'completada');
+    INSERT INTO venta (store_id, cash_session_id, receipt_number, user_id, subtotal, total, payment_method, amount_received, change_given, status, sale_date)
+    VALUES (p_store_id, p_cash_session_id, p_receipt_number, p_user_id, v_total, v_total, p_payment_method, p_amount_received, p_amount_received - v_total, 'completada', NOW());
 
     SET v_sale_id = LAST_INSERT_ID();
 
@@ -59,8 +60,9 @@ END //
 DELIMITER ;
 
 -- SP2: Cerrar turno de caja con cálculo de arqueo
+DROP PROCEDURE IF EXISTS sp_cerrar_turno_caja;
 DELIMITER //
-CREATE PROCEDURE IF NOT EXISTS sp_cerrar_turno_caja(
+CREATE PROCEDURE sp_cerrar_turno_caja(
     IN p_session_id INT,
     IN p_actual_cash INT
 )
@@ -93,8 +95,9 @@ END //
 DELIMITER ;
 
 -- SP3: Reporte consolidado de ventas diarias por categoría
+DROP PROCEDURE IF EXISTS sp_reporte_ventas_diarias;
 DELIMITER //
-CREATE PROCEDURE IF NOT EXISTS sp_reporte_ventas_diarias(
+CREATE PROCEDURE sp_reporte_ventas_diarias(
     IN p_store_id INT,
     IN p_fecha DATE
 )
@@ -117,8 +120,9 @@ END //
 DELIMITER ;
 
 -- SP4: Registrar abono a deuda de cliente (fiado)
+DROP PROCEDURE IF EXISTS sp_abonar_deuda_cliente;
 DELIMITER //
-CREATE PROCEDURE IF NOT EXISTS sp_abonar_deuda_cliente(
+CREATE PROCEDURE sp_abonar_deuda_cliente(
     IN p_client_id INT,
     IN p_amount INT,
     IN p_payment_method VARCHAR(20),
@@ -151,8 +155,9 @@ END //
 DELIMITER ;
 
 -- SP5: Alertar productos con stock crítico (reorden)
+DROP PROCEDURE IF EXISTS sp_reorden_stock_minimo;
 DELIMITER //
-CREATE PROCEDURE IF NOT EXISTS sp_reorden_stock_minimo(
+CREATE PROCEDURE sp_reorden_stock_minimo(
     IN p_store_id INT,
     IN p_umbral INT
 )
@@ -185,8 +190,9 @@ DELIMITER ;
 -- ============================================================
 
 -- TRG1: Auditar cambios de precio de productos
+DROP TRIGGER IF EXISTS trg_auditoria_cambio_precio;
 DELIMITER //
-CREATE TRIGGER IF NOT EXISTS trg_auditoria_cambio_precio
+CREATE TRIGGER trg_auditoria_cambio_precio
 BEFORE UPDATE ON producto
 FOR EACH ROW
 BEGIN
@@ -203,8 +209,9 @@ END //
 DELIMITER ;
 
 -- TRG2: Prevenir stock negativo en productos
+DROP TRIGGER IF EXISTS trg_evitar_stock_negativo;
 DELIMITER //
-CREATE TRIGGER IF NOT EXISTS trg_evitar_stock_negativo
+CREATE TRIGGER trg_evitar_stock_negativo
 BEFORE UPDATE ON producto
 FOR EACH ROW
 BEGIN
@@ -215,8 +222,9 @@ END //
 DELIMITER ;
 
 -- TRG3: Registrar auditoría al crear una venta
+DROP TRIGGER IF EXISTS trg_auditoria_nueva_venta;
 DELIMITER //
-CREATE TRIGGER IF NOT EXISTS trg_auditoria_nueva_venta
+CREATE TRIGGER trg_auditoria_nueva_venta
 AFTER INSERT ON venta
 FOR EACH ROW
 BEGIN
@@ -232,8 +240,9 @@ END //
 DELIMITER ;
 
 -- TRG4: Actualizar saldo de crédito al registrar un abono
+DROP TRIGGER IF EXISTS trg_actualizar_saldo_credito;
 DELIMITER //
-CREATE TRIGGER IF NOT EXISTS trg_actualizar_saldo_credito
+CREATE TRIGGER trg_actualizar_saldo_credito
 AFTER INSERT ON pago_credito
 FOR EACH ROW
 BEGIN
@@ -249,8 +258,9 @@ END //
 DELIMITER ;
 
 -- TRG5: Auditar eliminación de usuarios
+DROP TRIGGER IF EXISTS trg_auditoria_eliminar_usuario;
 DELIMITER //
-CREATE TRIGGER IF NOT EXISTS trg_auditoria_eliminar_usuario
+CREATE TRIGGER trg_auditoria_eliminar_usuario
 BEFORE DELETE ON usuario
 FOR EACH ROW
 BEGIN

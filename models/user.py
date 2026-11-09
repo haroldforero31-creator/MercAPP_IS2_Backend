@@ -64,8 +64,24 @@ class User(UserMixin, db.Model):
     is_active_cashier = db.Column(db.Boolean, default=True)
     status = db.Column(db.String(20), default='ACTIVO')
     failed_attempts = db.Column(db.Integer, default=0)
+    locked_until = db.Column(db.DateTime, nullable=True)
     last_login = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.now)
+
+    def is_locked(self):
+        """Verifica si la cuenta está bloqueada temporalmente (15 min) o permanente."""
+        if self.status == 'BLOQUEADO':
+            if self.locked_until:
+                if datetime.now() < self.locked_until:
+                    return True
+                else:
+                    # El bloqueo temporal de 15 minutos ha expirado: auto-desbloqueo
+                    self.status = 'ACTIVO'
+                    self.failed_attempts = 0
+                    self.locked_until = None
+                    return False
+            return True
+        return False
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)

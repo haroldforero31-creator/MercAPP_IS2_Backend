@@ -29,13 +29,10 @@ class BackupService:
         backup_filename = f"mercapp_backup_{timestamp}.db"
         backup_filepath = os.path.join(backup_dir, backup_filename)
 
-        # Usar la API oficial de backup online de SQLite para no corromper la BD activa
-        src = sqlite3.connect(db_path)
-        dst = sqlite3.connect(backup_filepath)
-        with dst:
-            src.backup(dst, pages=100)
-        dst.close()
-        src.close()
+        # FIX SonarCloud Integrante 4: Uso de context managers para conexiones seguras
+        with sqlite3.connect(db_path) as src:
+            with sqlite3.connect(backup_filepath) as dst:
+                src.backup(dst, pages=100)
 
         return backup_filepath
 

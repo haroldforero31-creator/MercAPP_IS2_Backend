@@ -107,14 +107,28 @@ csrf = CSRFProtect(app)
 # ============================================================
 # CORS — Cross-Origin Resource Sharing (Criterio D - Sustentación)
 # ============================================================
-CORS(app, resources={
-    r"/api/*": {
-        "origins": os.getenv('CORS_ORIGINS', '*').split(','),
-        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization", "X-CSRFToken"],
-        "supports_credentials": True
-    }
-})
+# FIX-1: CORS restringido — no reflejar cualquier origen con credenciales
+_cors_origins_raw = os.getenv('CORS_ORIGINS', '').strip()
+if _cors_origins_raw and _cors_origins_raw != '*':
+    # Origenes explícitos: permite credenciales solo con dominios conocidos
+    CORS(app, resources={
+        r"/api/*": {
+            "origins": [o.strip() for o in _cors_origins_raw.split(',') if o.strip()],
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization", "X-CSRFToken"],
+            "supports_credentials": True
+        }
+    })
+else:
+    # Sin origenes configurados: permitir cualquier origen pero SIN credenciales (seguro)
+    CORS(app, resources={
+        r"/api/*": {
+            "origins": "*",
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"],
+            "supports_credentials": False
+        }
+    })
 
 app.config['WTF_CSRF_HEADERS'] = ['X-CSRFToken', 'X-CSRF-Token']
 app.config['WTF_CSRF_TIME_LIMIT'] = 43200  # P1-13: 12 horas alineado con sesion de caja
@@ -205,6 +219,13 @@ with app.app_context():
                 db.session.execute(text(sql))
             except Exception:
                 pass
+        
+        # Migración segura de columnas requeridas
+        try:
+            db.session.execute(text("ALTER TABLE usuario ADD COLUMN locked_until DATETIME"))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
         db.session.commit()
         print("Tablas e indices de base de datos verificados/creados con exito.")
     except Exception as _e_init:
@@ -247,6 +268,12 @@ def authenticate_jwt_if_present():
                 user = db.session.get(User, user_id)
                 if user and user.status == 'ACTIVO':
                     login_user(user, remember=False)
+                    # Solicitudes autenticadas mediante Bearer Token JWT son inmunes a CSRF
+                    if request.endpoint:
+                        view = app.view_functions.get(request.endpoint)
+                        if view:
+                            dest = f"{view.__module__}.{view.__name__}"
+                            csrf._exempt_views.add(dest)
         except Exception:
             pass
 
@@ -502,6 +529,7 @@ def send_verification_email(email, code):
         msg.html = f"""
         <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 30px; background: #1A1F2E; color: #E8EAED; border-radius: 16px;">
             <div style="text-align: center; margin-bottom: 24px;">
+                <img src="https://mercapp-deploy.onrender.com/static/images/logo_mercapp.png" alt="MercAPP Logo" width="56" height="56" style="margin-bottom: 8px; border-radius: 8px;" onerror="this.style.display='none'">
                 <h1 style="font-size: 1.8rem; margin: 8px 0 4px; background: linear-gradient(135deg, #2E7D32, #FFA726); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">MercAPP</h1>
                 <p style="color: #9AA0A6; font-size: 0.9rem;">Sistema de Supermercado</p>
             </div>
@@ -558,6 +586,7 @@ def send_reset_email(user, token):
         msg.html = f"""
         <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 30px; background: #1A1F2E; color: #E8EAED; border-radius: 16px;">
             <div style="text-align: center; margin-bottom: 24px;">
+                <img src="https://mercapp-deploy.onrender.com/static/images/logo_mercapp.png" alt="MercAPP Logo" width="56" height="56" style="margin-bottom: 8px; border-radius: 8px;" onerror="this.style.display='none'">
                 <h1 style="font-size: 1.8rem; margin: 8px 0 4px; color: #FFA726;">MercAPP</h1>
                 <p style="color: #9AA0A6; font-size: 0.9rem;">Recuperación de Contraseña</p>
             </div>
@@ -632,6 +661,7 @@ def send_credit_sale_invoice(client, sale, sale_items):
         msg.html = f"""
         <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #121622; color: #E8EAED; border-radius: 16px; overflow: hidden; border: 1px solid #2D3344; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
             <div style="background: linear-gradient(135deg, #1b5e20, #2E7D32); padding: 24px; text-align: center;">
+                <img src="https://mercapp-deploy.onrender.com/static/images/logo_mercapp.png" alt="Logo" width="48" height="48" style="margin-bottom: 8px; border-radius: 8px;" onerror="this.style.display='none'"><br>
                 <h1 style="margin: 0; font-size: 1.6rem; color: #FFFFFF; letter-spacing: 0.5px;">{store_name}</h1>
                 <p style="margin: 4px 0 0; color: rgba(255,255,255,0.85); font-size: 0.9rem;">Comprobante Oficial de Compra a Crédito (Fiado)</p>
             </div>
@@ -728,6 +758,7 @@ def send_credit_payment_receipt(client, payment, previous_debt):
         msg.html = f"""
         <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #121622; color: #E8EAED; border-radius: 16px; overflow: hidden; border: 1px solid #2D3344; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
             <div style="background: linear-gradient(135deg, #0D47A1, #1976D2); padding: 24px; text-align: center;">
+                <img src="https://mercapp-deploy.onrender.com/static/images/logo_mercapp.png" alt="Logo" width="48" height="48" style="margin-bottom: 8px; border-radius: 8px;" onerror="this.style.display='none'"><br>
                 <h1 style="margin: 0; font-size: 1.6rem; color: #FFFFFF; letter-spacing: 0.5px;">{store_name}</h1>
                 <p style="margin: 4px 0 0; color: rgba(255,255,255,0.85); font-size: 0.9rem;">Recibo Oficial de Abono a Deuda</p>
             </div>
@@ -1121,11 +1152,20 @@ def get_store_settings():
 
 @app.after_request
 def add_security_headers(response):
-    """P1-3 FIX: Cabeceras de seguridad HTTP."""
+    """Cabeceras de seguridad HTTP reales y verificables."""
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'SAMEORIGIN'
     response.headers['X-XSS-Protection'] = '1; mode=block'
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    # FIX-3: Content-Security-Policy real (antes no existía)
+    response.headers['Content-Security-Policy'] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com; "
+        "img-src 'self' data: blob:; "
+        "connect-src 'self'"
+    )
     if os.getenv('RENDER') or os.getenv('HTTPS_ONLY'):
         response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
     return response
@@ -1291,9 +1331,9 @@ def download_pos():
 def verify_admin():
     """Doble confirmación con contraseña de administrador antes de entrar a zonas críticas."""
     next_url = request.args.get('next') or url_for('settings')
-    # P1-17 FIX: Sanitizar next_url para evitar open redirect fuera de la aplicacion
-    if not next_url.startswith('/') or next_url.startswith('//'):
-        next_url = url_for('settings')
+    # FIX-6: Usar sanitize_next_url centralizado en vez de validación inline
+    from utilities.security import sanitize_next_url
+    next_url = sanitize_next_url(next_url, fallback=url_for('settings'))
     
     if request.method == 'POST':
         password = request.form.get('password', '')
@@ -1405,12 +1445,17 @@ def login():
             if not user.is_admin:
                 flash('Solo los administradores pueden iniciar sesión aquí.', 'error')
                 return render_template('inicio_sesion.html')
-            if user.status == 'BLOQUEADO':
-                flash('Tu cuenta está bloqueada. Contacta al administrador.', 'error')
+            if hasattr(user, 'is_locked') and user.is_locked():
+                if user.locked_until:
+                    rem = max(1, int((user.locked_until - datetime.now()).total_seconds() / 60) + 1)
+                    flash(f'Tu cuenta está bloqueada temporalmente por 5 intentos fallidos. Intenta de nuevo en {rem} minutos.', 'error')
+                else:
+                    flash('Tu cuenta está bloqueada. Contacta al administrador.', 'error')
                 log_audit('LOGIN_BLOCKED', f'Intento de login con cuenta bloqueada: {email}', user.id, 'WARNING')
                 return render_template('inicio_sesion.html')
             
             user.failed_attempts = 0
+            user.locked_until = None
             user.last_login = datetime.now()
             db.session.commit()
 
@@ -1427,7 +1472,8 @@ def login():
                 user.failed_attempts += 1
                 if user.failed_attempts >= 5:
                     user.status = 'BLOQUEADO'
-                    log_audit('ACCOUNT_LOCKED', f'Cuenta bloqueada por {user.failed_attempts} intentos fallidos: {email}', user.id, 'CRITICAL')
+                    user.locked_until = datetime.now() + timedelta(minutes=15)
+                    log_audit('ACCOUNT_LOCKED', f'Cuenta bloqueada por 15 minutos tras {user.failed_attempts} intentos fallidos: {email}', user.id, 'CRITICAL')
                 db.session.commit()
             log_audit('LOGIN_FAILED', f'Intento de login fallido para: {email}', user.id if user else None, 'WARNING')
             flash('Email o contraseña incorrectos.', 'error')
@@ -5504,11 +5550,9 @@ from controllers.sale_controller import sale_controller
 from controllers.merki_controller import merki_controller
 
 app.register_blueprint(user_controller)
-csrf.exempt(user_controller)  # API JSON usa autenticación por sesión, no tokens CSRF
 app.register_blueprint(product_controller)
 app.register_blueprint(sale_controller)
 app.register_blueprint(merki_controller)
-csrf.exempt(merki_controller)  # API JSON exenta de CSRF
 
 
 # ============================================================

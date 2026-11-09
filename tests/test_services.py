@@ -269,3 +269,126 @@ def test_jwt_token_generation_and_auth(client, test_app_ctx):
     users_res = client.get('/api/users', headers=headers)
     assert users_res.status_code == 200
     assert users_res.is_json
+
+
+def test_sanitize_next_url_helper():
+    from utilities.security import sanitize_next_url
+    assert sanitize_next_url('/pos') == '/pos'
+    assert sanitize_next_url('http://evil.com') == '/'
+    assert sanitize_next_url('https://attacker.site') == '/'
+    assert sanitize_next_url('//evil.com') == '/'
+    assert sanitize_next_url('javascript:alert(1)') == '/'
+    assert sanitize_next_url(None, fallback='/settings') == '/settings'
+
+
+def test_user_temporary_lockout(test_app_ctx):
+    from datetime import datetime, timedelta
+    store = test_app_ctx["store"]
+    user = User(
+        name="User Lock Test",
+        email=f"lock_{int(datetime.now().timestamp())}@test.com",
+        store_id=store.id,
+        status="ACTIVO",
+        failed_attempts=0
+    )
+    user.set_password("Pass123!")
+    db.session.add(user)
+    db.session.commit()
+
+    assert user.is_locked() is False
+
+    # Simulate lockout for 15 minutes
+    user.status = 'BLOQUEADO'
+    user.failed_attempts = 5
+    user.locked_until = datetime.now() + timedelta(minutes=15)
+    db.session.commit()
+
+    assert user.is_locked() is True
+
+    # Simulate expiration of lockout
+    user.locked_until = datetime.now() - timedelta(minutes=1)
+    db.session.commit()
+
+    # Accessing is_locked should auto-unlock
+    assert user.is_locked() is False
+    assert user.status == 'ACTIVO'
+
+
+def test_database_routines_service(test_app_ctx):
+    from services.database_routines_service import DatabaseRoutinesService
+    from models import CashSession
+    store = test_app_ctx["store"]
+    cat = test_app_ctx["category"]
+
+    # 1. Product creation
+    prod = Product(store_id=store.id, category_id=cat.id, name="Test SP Prod", price=1000, stock=20)
+    db.session.add(prod)
+    db.session.flush()
+
+    user = User.query.filter_by(store_id=store.id).first()
+
+    # 2. Open Cash Session
+    sess = CashSession(store_id=store.id, user_id=user.id, base_amount=10000, status='abierta')
+    db.session.add(sess)
+    db.session.commit()
+
+    # 3. Test SP1: Registrar venta POS
+    sale = DatabaseRoutinesService.sp_registrar_venta_pos(
+        store_id=store.id,
+        user_id=user.id,
+        cash_session_id=sess.id,
+        receipt_number=f"REC-{int(datetime.now().timestamp())}",
+        product_id=prod.id,
+        quantity=2,
+        unit_price=1000,
+        payment_method="efectivo",
+        amount_received=5000
+    )
+    assert sale.id is not None
+    assert prod.stock == 18
+
+    # 4. Test SP3: Reporte ventas diarias
+    rep = DatabaseRoutinesService.sp_reporte_ventas_diarias(store.id)
+    assert isinstance(rep, list)
+
+    # 5. Test SP5: Reorden stock minimo
+    reorder = DatabaseRoutinesService.sp_reorden_stock_minimo(store.id, umbral=25)
+    assert isinstance(reorder, list)
+    assert any(p["id"] == prod.id for p in reorder)
+
+    # 6. Test SP2: Cerrar turno caja
+    closed_sess = DatabaseRoutinesService.sp_cerrar_turno_caja(sess.id, actual_cash=12000)
+    assert closed_sess.status == 'cerrada'
+
+    # 7. Test SP4: Abonar deuda cliente
+    from models import CreditClient, CreditSale
+    client = CreditClient(store_id=store.id, name="Cliente Fiado Test", phone="3001234567", email="fiado@test.com")
+    db.session.add(client)
+    db.session.flush()
+
+    cs = CreditSale(client_id=client.id, sale_id=sale.id, amount=10000, balance=10000, status='pendiente')
+    db.session.add(cs)
+    db.session.commit()
+
+    payment = DatabaseRoutinesService.sp_abonar_deuda_cliente(client.id, amount=5000)
+    assert payment.amount == 5000
+    assert cs.balance == 5000
+
+    # 8. Test Triggers
+    assert DatabaseRoutinesService.trg_auditoria_cambio_precio(prod.id, 1000, 1500) is True
+    assert DatabaseRoutinesService.trg_evitar_stock_negativo(5) is True
+    with pytest.raises(ValueError):
+        DatabaseRoutinesService.trg_evitar_stock_negativo(-1)
+
+
+def test_rate_limiter_in_memory():
+    from utilities.rate_limiter import limiter
+    with app.test_request_context('/api/test', environ_base={'REMOTE_ADDR': '127.0.0.1'}):
+        is_limited, retry = limiter.is_rate_limited('test_unit', max_requests=2, window_seconds=60)
+        assert is_limited is False
+        is_limited, retry = limiter.is_rate_limited('test_unit', max_requests=2, window_seconds=60)
+        assert is_limited is False
+        is_limited, retry = limiter.is_rate_limited('test_unit', max_requests=2, window_seconds=60)
+        assert is_limited is True
+        assert retry > 0
+

@@ -13,7 +13,7 @@ class ProductRepository:
 
     @staticmethod
     def get_by_id(product_id: int):
-        return Product.query.get(product_id)
+        return db.session.get(Product, product_id)
 
     @staticmethod
     def get_by_barcode(barcode: str, store_id: int = 1):
@@ -76,4 +76,4 @@ class ProductRepository:
 
     @staticmethod
     def get_category_by_id(category_id: int):
-        return Category.query.get(category_id)
+        return db.session.get(Category, category_id)

@@ -97,9 +97,13 @@ def generate_sales_report_excel(sales_data, store_name="MercAPP", period="Hoy"):
         ws.column_dimensions[chr(64 + i)].width = w
 
     output = BytesIO()
-    wb.save(output)
-    output.seek(0)
-    return output
+    try:
+        wb.save(output)
+        output.seek(0)
+        return output
+    except Exception as e:
+        output.close()
+        raise e
 
 
 def generate_inventory_report_excel(products_data, store_name="MercAPP"):
@@ -164,6 +168,10 @@ def generate_inventory_report_excel(products_data, store_name="MercAPP"):
         ws.column_dimensions[chr(64 + i)].width = w
 
     output = BytesIO()
-    wb.save(output)
-    output.seek(0)
-    return output
+    try:
+        wb.save(output)
+        output.seek(0)
+        return output
+    except Exception as e:
+        output.close()
+        raise e

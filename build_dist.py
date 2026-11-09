@@ -92,8 +92,8 @@ INSTRUCCIONES DE USO:
    de escritorio (sin barras de navegación para emular un POS nativo).
 
 3. Licencia del Sistema:
-   - Contraseña maestra de desbloqueo y renovación (60 días):
-     Foreroyulian321.2026
+   - Clave de activación: Gestionada de forma segura a través de la variable
+     de entorno LICENSE_MASTER_KEY o solicitada al administrador del sistema.
    - Al abrir por primera vez, ingresa la clave para activar
      tu periodo bimensual de uso.
 
