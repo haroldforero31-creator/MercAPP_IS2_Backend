@@ -17,6 +17,17 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
+# P1 FIX: Usar base de datos aislada para pruebas de estrés (no tocar producción ni mercapp.db)
+TEST_DB_PATH = os.path.join(BASE_DIR, 'test_stress.db')
+if os.path.exists(TEST_DB_PATH):
+    try:
+        os.remove(TEST_DB_PATH)
+    except Exception:
+        pass
+os.environ['DATABASE_URL'] = f'sqlite:///{TEST_DB_PATH}'
+os.environ['SECRET_KEY'] = 'test-stress-secret-key'
+
+
 from app import app, db
 from models import User, Store, CashSession, Product, Category, Sale, SaleItem, AppLicense
 from datetime import datetime, timedelta
@@ -61,7 +72,7 @@ def prepare_test_environment():
         # Ensure Category
         cat = Category.query.filter_by(store_id=store.id).first()
         if not cat:
-            cat = Category(name="General", store_id=store.id)
+            cat = Category(name="General", slug="general", store_id=store.id)
             db.session.add(cat)
             db.session.flush()
 
@@ -93,7 +104,7 @@ def prepare_test_environment():
             session = CashSession(
                 store_id=store.id,
                 user_id=user.id,
-                opening_balance=50000,
+                base_amount=50000,
                 opened_at=now
             )
             db.session.add(session)

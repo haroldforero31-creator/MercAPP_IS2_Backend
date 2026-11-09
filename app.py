@@ -1,16 +1,22 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, send_from_directory, jsonify, make_response, session, Response, abort
+from flask import Flask, render_template, request, redirect, url_for, flash, send_from_directory, send_file, jsonify, make_response, session, Response, abort
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import func, desc, text, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import joinedload
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask_mail import Mail, Message
+from flask_wtf.csrf import CSRFProtect
+from flask_cors import CORS
+import jwt as pyjwt
+from utilities.rate_limiter import limiter
+
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 from PIL import Image
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-import os, sys, re, io, csv, secrets, difflib, random, time, socket, threading
+import os, sys, re, io, json, urllib.request, csv, secrets, difflib, random, time, socket, threading, logging
+from logging.handlers import RotatingFileHandler
 
 try:
     import serial
@@ -51,30 +57,99 @@ if os.path.exists(dotenv_path):
 UPLOAD_DIR = os.path.join(base_dir, 'uploads')
 os.makedirs(os.path.join(UPLOAD_DIR, 'products'), exist_ok=True)
 os.makedirs(os.path.join(UPLOAD_DIR, 'categories'), exist_ok=True)
+os.makedirs(os.path.join(UPLOAD_DIR, 'invoices'), exist_ok=True)
 
 # Also ensure frontend static/images exist
 STATIC_IMG_DIR = os.path.join(frontend_dir, 'static', 'images')
 os.makedirs(os.path.join(STATIC_IMG_DIR, 'products'), exist_ok=True)
 os.makedirs(os.path.join(STATIC_IMG_DIR, 'categories'), exist_ok=True)
+os.makedirs(os.path.join(STATIC_IMG_DIR, 'invoices'), exist_ok=True)
+
+
+# ============================================================
+# CONFIGURACIÓN DE OBSERVABILIDAD Y LOGGING ESTRUCTURADO (P2)
+# ============================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] [%(name)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger('mercapp')
 
 app = Flask(__name__, 
             template_folder=os.path.join(frontend_dir, 'templates'),
             static_folder=os.path.join(frontend_dir, 'static'))
 
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'sprint4-nueva-clave-2026')
+# P0 FIX: SECRET_KEY nunca debe tener un valor por defecto predecible
+import secrets as _secrets
+_env_secret = os.getenv('SECRET_KEY')
+if not _env_secret:
+    # P1-12 FIX: Persistir clave en archivo local para que todos los workers de Gunicorn compartan la misma
+    _key_file = os.path.join(base_dir, '.secret_key')
+    if os.path.exists(_key_file):
+        try:
+            with open(_key_file, 'r', encoding='utf-8') as _kf:
+                _env_secret = _kf.read().strip()
+        except Exception:
+            _env_secret = None
+    if not _env_secret:
+        _env_secret = _secrets.token_hex(32)
+        try:
+            with open(_key_file, 'w', encoding='utf-8') as _kf:
+                _kf.write(_env_secret)
+        except Exception:
+            pass
+app.config['SECRET_KEY'] = _env_secret
+
+# P0 FIX: Protección CSRF real
+csrf = CSRFProtect(app)
+
+# ============================================================
+# CORS — Cross-Origin Resource Sharing (Criterio D - Sustentación)
+# ============================================================
+CORS(app, resources={
+    r"/api/*": {
+        "origins": os.getenv('CORS_ORIGINS', '*').split(','),
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization", "X-CSRFToken"],
+        "supports_credentials": True
+    }
+})
+
+app.config['WTF_CSRF_HEADERS'] = ['X-CSRFToken', 'X-CSRF-Token']
+app.config['WTF_CSRF_TIME_LIMIT'] = 43200  # P1-13: 12 horas alineado con sesion de caja
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # P0-7: Limite de 16MB para subidas  # 2 horas para evitar expiracion en sesiones largas de caja
+
+# P1 FIX #12: Configuracion de seguridad para cookies de sesion
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+if os.getenv('RENDER') or os.getenv('HTTPS_ONLY') or os.getenv('SESSION_COOKIE_SECURE', '').lower() in ('1', 'true'):
+    app.config['SESSION_COOKIE_SECURE'] = True
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=12)
 
 db_url = os.getenv('DATABASE_URL')
 if db_url:
     if db_url.startswith('postgres://'):
         db_url = db_url.replace('postgres://', 'postgresql://', 1)
+    # TiDB Cloud provides mysql:// URLs — use pymysql driver
+    if db_url.startswith('mysql://'):
+        db_url = db_url.replace('mysql://', 'mysql+pymysql://', 1)
     app.config['SQLALCHEMY_DATABASE_URI'] = db_url
-    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-        'pool_size': int(os.getenv('DB_POOL_SIZE', 50)),
-        'max_overflow': int(os.getenv('DB_MAX_OVERFLOW', 100)),
+    engine_opts = {
+        'pool_size': int(os.getenv('DB_POOL_SIZE', 10)),
+        'max_overflow': int(os.getenv('DB_MAX_OVERFLOW', 20)),
         'pool_timeout': 30,
         'pool_recycle': 1800,
         'pool_pre_ping': True
     }
+    # TiDB Cloud requires SSL
+    if 'tidbcloud' in db_url or os.getenv('TIDB_SSL', ''):
+        import ssl as _ssl
+        ssl_ctx = _ssl.create_default_context()
+        ssl_ctx.check_hostname = True
+        ssl_ctx.verify_mode = _ssl.CERT_REQUIRED
+        engine_opts['connect_args'] = {'ssl': ssl_ctx}
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = engine_opts
 else:
     app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(base_dir, 'mercapp.db')}"
     app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
@@ -91,7 +166,7 @@ app.config['MAIL_SERVER'] = os.getenv('MAIL_SERVER', 'smtp.gmail.com')
 app.config['MAIL_PORT'] = int(os.getenv('MAIL_PORT', 587))
 app.config['MAIL_USE_TLS'] = True
 app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME', 'mercapp.services@gmail.com')
-app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD', 'mykrejpwsnpdpbom')
+app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD', '')  # P0 FIX: sin password por defecto
 app.config['MAIL_DEFAULT_SENDER'] = ('MercAPP', os.getenv('MAIL_USERNAME', 'mercapp.services@gmail.com'))
 
 mail = Mail(app)
@@ -101,9 +176,40 @@ from models import (
     EmailVerification, PasswordReset, Category, Subcategory, Product,
     CashSession, Sale, SaleItem, CreditClient, CreditSale, CreditPayment,
     Order, OrderItem, OrderNotification, AppLicense, EmailQueue,
-    Supplier, PurchaseOrder, PurchaseOrderItem, SupplierInvoice
+    Supplier, PurchaseOrder, PurchaseOrderItem, SupplierInvoice,
+    SupplierEmailVerification, SupplierDelivery
 )
 db.init_app(app)
+
+# Inicialización automática de tablas y licencia en base de datos para entorno Cloud / Gunicorn
+with app.app_context():
+    try:
+        db.create_all()
+        if not AppLicense.query.first():
+            initial_license = AppLicense(expiration_date=datetime.now() + timedelta(days=int(os.getenv('TRIAL_DAYS', 30))), last_time_checked=datetime.now())
+            db.session.add(initial_license)
+            db.session.commit()
+        # P1-8 & Fase 2: Creacion de indices de alto rendimiento
+        indexes_sql = [
+            "CREATE INDEX IF NOT EXISTS idx_venta_store_date ON venta (store_id, sale_date)",
+            "CREATE INDEX IF NOT EXISTS idx_venta_store_id ON venta (store_id)",
+            "CREATE INDEX IF NOT EXISTS idx_venta_session ON venta (cash_session_id)",
+            "CREATE INDEX IF NOT EXISTS idx_producto_store_barcode ON producto (store_id, barcode)",
+            "CREATE INDEX IF NOT EXISTS idx_producto_store_id ON producto (store_id)",
+            "CREATE INDEX IF NOT EXISTS idx_sesion_caja_store_status ON sesion_caja (store_id, status)",
+            "CREATE INDEX IF NOT EXISTS idx_pedido_store_status ON pedido (store_id, status)",
+            "CREATE INDEX IF NOT EXISTS idx_auditoria_created ON auditoria (created_at)"
+        ]
+        for sql in indexes_sql:
+            try:
+                db.session.execute(text(sql))
+            except Exception:
+                pass
+        db.session.commit()
+        print("Tablas e indices de base de datos verificados/creados con exito.")
+    except Exception as _e_init:
+        print(f"[INIT DB] Aviso en inicializacion de tablas: {_e_init}")
+
 
 @event.listens_for(Engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):
@@ -111,6 +217,7 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
     if type(dbapi_connection).__module__ == 'sqlite3':
         try:
             cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys = ON")
             cursor.execute("PRAGMA journal_mode = WAL")
             cursor.execute("PRAGMA busy_timeout = 30000")
             cursor.execute("PRAGMA synchronous = NORMAL")
@@ -124,6 +231,50 @@ login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 login_manager.login_message = 'Por favor inicia sesión para acceder.'
 login_manager.login_message_category = 'error'
+
+# P1-18 FIX: Responder JSON 401 en llamadas API para no romper clientes fetch con 302 HTML
+
+@app.before_request
+def authenticate_jwt_if_present():
+    """Autentica automáticamente a los clientes que envíen Bearer Token JWT (Criterio D)."""
+    auth_header = request.headers.get('Authorization', '')
+    if auth_header.startswith('Bearer '):
+        token = auth_header.split(' ', 1)[1]
+        try:
+            payload = pyjwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+            user_id = payload.get('user_id')
+            if user_id:
+                user = db.session.get(User, user_id)
+                if user and user.status == 'ACTIVO':
+                    login_user(user, remember=False)
+        except Exception:
+            pass
+
+@login_manager.unauthorized_handler
+def handle_unauthorized_access():
+    if request.path.startswith('/api/') or request.is_json:
+        return jsonify({'success': False, 'error': 'No autorizado. Se requiere iniciar sesión.'}), 401
+    flash('Por favor inicia sesión para acceder.', 'error')
+    return redirect(url_for('login', next=request.url))
+
+# JWT Request Loader — Permite autenticar peticiones API vía Bearer Token (Criterio D)
+@login_manager.request_loader
+def load_user_from_request(req):
+    auth_header = req.headers.get('Authorization', '')
+    if auth_header.startswith('Bearer '):
+        token = auth_header.split(' ', 1)[1]
+        try:
+            payload = pyjwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+            user_id = payload.get('user_id')
+            if user_id:
+                user = db.session.get(User, user_id)
+                if user and user.status == 'ACTIVO':
+                    return user
+        except Exception as _e_jwt:
+            print('[JWT DEBUG ERROR]:', type(_e_jwt), _e_jwt)
+            return None
+    return None
+
 
 from utilities.helpers import (
     round_to_50, format_weight, generate_verification_code, validate_payment
@@ -279,6 +430,62 @@ def generate_receipt_number(store_id=None):
         candidate = f"{prefix}{seq:04d}_{suffix}"
     return candidate
 
+
+def send_via_http_api(to_email, subject, html_content):
+    """
+    Envía correo a través de HTTPS (puerto 443) para eludir el bloqueo de puertos SMTP (587/465)
+    en plataformas cloud como Render Free Tier. Soporta Brevo y Resend.
+    """
+    brevo_key = os.getenv('BREVO_API_KEY')
+    if brevo_key:
+        try:
+            sender_email = os.getenv('BREVO_SENDER_EMAIL', os.getenv('MAIL_USERNAME', 'mercapp.services@gmail.com'))
+            sender_name = os.getenv('MAIL_SENDER_NAME', 'MercAPP')
+            url = "https://api.brevo.com/v3/smtp/email"
+            headers = {
+                "accept": "application/json",
+                "api-key": brevo_key.strip(),
+                "content-type": "application/json"
+            }
+            payload = {
+                "sender": {"name": sender_name, "email": sender_email},
+                "to": [{"email": to_email}],
+                "subject": subject,
+                "htmlContent": html_content
+            }
+            req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status in (200, 201):
+                    print(f"[BREVO SUCCESS] Correo entregado exitosamente por HTTPS a {to_email}")
+                    return True
+        except Exception as e:
+            print(f"[BREVO ERROR] Error enviando por Brevo API a {to_email}: {e}")
+
+    resend_key = os.getenv('RESEND_API_KEY')
+    if resend_key:
+        try:
+            sender_email = os.getenv('RESEND_SENDER_EMAIL', 'onboarding@resend.dev')
+            url = "https://api.resend.com/emails"
+            headers = {
+                "Authorization": f"Bearer {resend_key.strip()}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "from": f"MercAPP <{sender_email}>",
+                "to": [to_email],
+                "subject": subject,
+                "html": html_content
+            }
+            req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status in (200, 201):
+                    print(f"[RESEND SUCCESS] Correo entregado exitosamente por Resend a {to_email}")
+                    return True
+        except Exception as e:
+            print(f"[RESEND ERROR] Error enviando por Resend API a {to_email}: {e}")
+
+    return False
+
 def send_verification_email(email, code):
     """Send a verification code to the specified email address via Gmail SMTP."""
     print("\n" + "="*50)
@@ -313,9 +520,25 @@ def send_verification_email(email, code):
             </p>
         </div>
         """
-        mail.send(msg)
+                # 1. Enviar vía API HTTP (Brevo/Resend) si está configurado para eludir bloqueo SMTP de Render
+        if os.getenv('BREVO_API_KEY') or os.getenv('RESEND_API_KEY'):
+            def _async_http_v():
+                send_via_http_api(email, f'MercAPP - Tu código de verificación: {code}', msg.html)
+            threading.Thread(target=_async_http_v, daemon=True).start()
+            return True
+
+        app_obj = app._get_current_object() if hasattr(app, '_get_current_object') else app
+        def _async_send_v(app_inst, message_obj):
+            with app_inst.app_context():
+                try:
+                    mail.send(message_obj)
+                    print(f"[MAIL SUCCESS] Correo de verificacion entregado a {email}")
+                except BaseException as ex:
+                    print(f"[MAIL NOTICE] Envio de verificacion a {email}: {ex}")
+
+        threading.Thread(target=_async_send_v, args=(app_obj, msg), daemon=True).start()
         return True
-    except Exception as e:
+    except BaseException as e:
         print(f"MAIL ERROR: {str(e)}")
         return True
 
@@ -346,9 +569,25 @@ def send_reset_email(user, token):
             <p style="font-size: 0.85rem; color: #9AA0A6;">Este enlace expirará en 1 hora. Si no lo solicitaste, puedes ignorar este mensaje.</p>
         </div>
         """
-        mail.send(msg)
+                # Enviar vía API HTTP si está configurado
+        if os.getenv('BREVO_API_KEY') or os.getenv('RESEND_API_KEY'):
+            def _async_http_r():
+                send_via_http_api(user.email, 'MercAPP - Recuperación de Contraseña', msg.html)
+            threading.Thread(target=_async_http_r, daemon=True).start()
+            return True
+
+        app_obj = app._get_current_object() if hasattr(app, '_get_current_object') else app
+        def _async_send_r(app_inst, message_obj):
+            with app_inst.app_context():
+                try:
+                    mail.send(message_obj)
+                    print(f"[MAIL SUCCESS] Correo de recuperacion entregado a {user.email}")
+                except BaseException as ex:
+                    print(f"[MAIL NOTICE] Envio de recuperacion a {user.email}: {ex}")
+
+        threading.Thread(target=_async_send_r, args=(app_obj, msg), daemon=True).start()
         return True
-    except Exception as e:
+    except BaseException as e:
         print(f"MAIL ERROR: {e}")
         return True
 
@@ -450,10 +689,17 @@ def send_credit_sale_invoice(client, sale, sale_items):
             </div>
         </div>
         """
-        mail.send(msg)
+        app_obj = app._get_current_object() if hasattr(app, '_get_current_object') else app
+        def _async_send_cs(app_inst, message_obj):
+            with app_inst.app_context():
+                try:
+                    mail.send(message_obj)
+                except BaseException as ex:
+                    print(f"[MAIL NOTICE] Error enviando factura de fiado a {client.email}: {ex}")
+        threading.Thread(target=_async_send_cs, args=(app_obj, msg), daemon=True).start()
         return True
-    except Exception as e:
-        print(f"[MAIL] Error enviando factura de fiado a {client.email}: {e}")
+    except BaseException as e:
+        print(f"[MAIL] Error preparando factura de fiado a {client.email}: {e}")
         return False
 
 
@@ -539,10 +785,17 @@ def send_credit_payment_receipt(client, payment, previous_debt):
             </div>
         </div>
         """
-        mail.send(msg)
+        app_obj = app._get_current_object() if hasattr(app, '_get_current_object') else app
+        def _async_send_cp(app_inst, message_obj):
+            with app_inst.app_context():
+                try:
+                    mail.send(message_obj)
+                except BaseException as ex:
+                    print(f"[MAIL NOTICE] Error enviando recibo de abono a {client.email}: {ex}")
+        threading.Thread(target=_async_send_cp, args=(app_obj, msg), daemon=True).start()
         return True
-    except Exception as e:
-        print(f"[MAIL] Error enviando recibo de abono a {client.email}: {e}")
+    except BaseException as e:
+        print(f"[MAIL] Error preparando recibo de abono a {client.email}: {e}")
         return False
 
 
@@ -865,9 +1118,22 @@ def get_store_settings():
         db.session.commit()
     return settings
 
+
+@app.after_request
+def add_security_headers(response):
+    """P1-3 FIX: Cabeceras de seguridad HTTP."""
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    if os.getenv('RENDER') or os.getenv('HTTPS_ONLY'):
+        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    return response
+
 @app.context_processor
 def inject_csrf():
-    return dict(csrf_token=lambda: "")
+    from flask_wtf.csrf import generate_csrf
+    return dict(csrf_token=generate_csrf)
 
 @app.context_processor
 def inject_globals():
@@ -1025,6 +1291,9 @@ def download_pos():
 def verify_admin():
     """Doble confirmación con contraseña de administrador antes de entrar a zonas críticas."""
     next_url = request.args.get('next') or url_for('settings')
+    # P1-17 FIX: Sanitizar next_url para evitar open redirect fuera de la aplicacion
+    if not next_url.startswith('/') or next_url.startswith('//'):
+        next_url = url_for('settings')
     
     if request.method == 'POST':
         password = request.form.get('password', '')
@@ -1037,7 +1306,92 @@ def verify_admin():
             
     return render_template('verificar_admin.html', next=next_url)
 
+
+# ============================================================
+# JWT — JSON Web Tokens (Criterio D - Sustentación)
+# ============================================================
+def jwt_required(f):
+    """Decorador que verifica JWT Bearer Token O sesión de Flask-Login."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # 1. Si ya está autenticado por sesión, pasar
+        if current_user.is_authenticated:
+            return f(*args, **kwargs)
+        # 2. Intentar Bearer Token
+        auth_header = request.headers.get('Authorization', '')
+        if auth_header.startswith('Bearer '):
+            token = auth_header.split(' ', 1)[1]
+            try:
+                payload = pyjwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+                user = User.query.get(payload.get('user_id'))
+                if user and user.status == 'ACTIVO':
+                    login_user(user)
+                    return f(*args, **kwargs)
+            except pyjwt.ExpiredSignatureError:
+                return jsonify({'success': False, 'error': 'Token expirado'}), 401
+            except pyjwt.InvalidTokenError:
+                return jsonify({'success': False, 'error': 'Token inválido'}), 401
+        return jsonify({'success': False, 'error': 'Autenticación requerida. Envíe Bearer Token o inicie sesión.'}), 401
+    return decorated
+
+@app.route('/api/auth/token', methods=['POST'])
+@csrf.exempt
+@limiter.limit(max_requests=5, window_seconds=60, key='jwt_auth_token')
+def api_auth_token():
+    """POST /api/auth/token — Emite un JWT válido por 12 horas.
+    Body JSON: {"email": "...", "password": "..."}
+    Respuesta: {"success": true, "token": "eyJ...", "user": {...}}
+    """
+    data = request.get_json() or {}
+    email = (data.get('email') or '').strip().lower()
+    password = data.get('password', '')
+
+    if not email or not password:
+        return jsonify({'success': False, 'error': 'Email y contraseña son requeridos.'}), 400
+
+    user = User.query.filter_by(email=email).first()
+
+    if not user or not user.check_password(password):
+        if user:
+            user.failed_attempts = (user.failed_attempts or 0) + 1
+            if user.failed_attempts >= 5:
+                user.status = 'BLOQUEADO'
+            db.session.commit()
+        return jsonify({'success': False, 'error': 'Credenciales incorrectas.'}), 401
+
+    if user.status == 'BLOQUEADO':
+        return jsonify({'success': False, 'error': 'Cuenta bloqueada por demasiados intentos fallidos.'}), 403
+
+    user.failed_attempts = 0
+    user.last_login = datetime.now()
+    db.session.commit()
+
+    payload = {
+        'user_id': user.id,
+        'email': user.email,
+        'is_admin': user.is_admin,
+        'store_id': user.store_id,
+        'iat': int(datetime.now().timestamp()),
+        'exp': int((datetime.now() + timedelta(hours=12)).timestamp())
+    }
+    token = pyjwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
+
+    return jsonify({
+        'success': True,
+        'token': token,
+        'expires_in': 43200,
+        'user': {
+            'id': user.id,
+            'name': user.name,
+            'email': user.email,
+            'is_admin': user.is_admin,
+            'store_id': user.store_id
+        }
+    })
+
+
 @app.route('/login', methods=['GET', 'POST'])
+@limiter.limit(max_requests=5, window_seconds=60, key='web_admin_login')
 def login():
     if current_user.is_authenticated:
         return redirect(url_for('pos'))
@@ -1081,6 +1435,7 @@ def login():
     return render_template('inicio_sesion.html')
 
 @app.route('/register', methods=['GET', 'POST'])
+@limiter.limit(max_requests=5, window_seconds=60, key='web_register')
 def register():
     if current_user.is_authenticated:
         return redirect(url_for('pos'))
@@ -1130,7 +1485,7 @@ def register():
         # Enviar código por correo
         if send_verification_email(email, code):
             session['pending_verification_email'] = email
-            flash('Se ha enviado un código de verificación a tu correo electrónico.', 'success')
+            flash('Código de verificación enviado a tu correo electrónico.', 'success')
             return redirect(url_for('verify_email'))
         else:
             flash('Error al enviar el correo de verificación. Verifica que el correo sea válido e intenta de nuevo.', 'error')
@@ -1275,7 +1630,7 @@ def resend_code():
     db.session.commit()
     
     if send_verification_email(pending_email, code):
-        flash('Se ha enviado un nuevo código de verificación a tu correo.', 'success')
+        flash('Nuevo código de verificación enviado a tu correo electrónico.', 'success')
     else:
         flash('Error al reenviar el correo. Intenta de nuevo más tarde.', 'error')
         
@@ -1283,6 +1638,7 @@ def resend_code():
 
 
 @app.route('/forgot-password', methods=['GET', 'POST'])
+@limiter.limit(max_requests=3, window_seconds=300, key='web_forgot_password')
 def forgot_password():
     if current_user.is_authenticated:
         return redirect(url_for('pos'))
@@ -1302,10 +1658,9 @@ def forgot_password():
             db.session.add(reset_record)
             db.session.commit()
             
-            if send_reset_email(user, token):
-                flash('Se ha enviado un enlace de recuperación a tu correo.', 'success')
-            else:
-                flash('Error al enviar el correo. Intenta de nuevo más tarde.', 'error')
+            reset_link = url_for('reset_password', token=token, _external=True)
+            send_reset_email(user, token)
+            flash('Si la cuenta existe, se ha enviado un enlace de recuperación a tu correo.', 'success')
         else:
             flash('Si existe una cuenta asociada a ese correo, recibirás un enlace en unos momentos.', 'success')
             
@@ -1371,12 +1726,22 @@ def check_license():
                 return redirect(url_for('license'))
             
             if now > license_record.expiration_date:
+                # P0-8 FIX: Responder JSON 402 en APIs para no romper clientes fetch con 302 HTML
+                if request.path.startswith('/api/') or request.is_json:
+                    return jsonify({'success': False, 'error': 'Licencia vencida o inactiva', 'license_expired': True}), 402
                 return redirect(url_for('license'))
                 
             # Update last_time_checked every hour to save DB writes but keep track of time
             if not license_record.last_time_checked or (now - license_record.last_time_checked).total_seconds() > 3600:
                 license_record.last_time_checked = now
                 db.session.commit()
+        else:
+            # P0 FIX: Fail-closed — sin registro de licencia, negar acceso
+            if request.path.startswith('/api/') or request.is_json:
+                return jsonify({'success': False, 'error': 'No se encontró una licencia activa', 'license_expired': True}), 402
+            if request.endpoint not in ['login', 'register', 'static', None]:
+                flash('No se encontró una licencia activa. Contacte al administrador.', 'error')
+                return redirect(url_for('license'))
     except Exception:
         pass  # If DB isn't initialized yet
 
@@ -1388,6 +1753,11 @@ def restrict_customer_access():
         allowed_prefixes = ('/c/', '/customer/', '/api/c/', '/api/customer/', '/static/', '/logout')
         if not any(request.path.startswith(prefix) for prefix in allowed_prefixes) and request.path != '/logout':
             return redirect(url_for('customer_stores'))
+
+    if current_user.is_authenticated and isinstance(current_user, Supplier):
+        allowed_supplier_prefixes = ('/p/', '/proveedor/', '/api/p/', '/static/', '/logout')
+        if not any(request.path.startswith(prefix) for prefix in allowed_supplier_prefixes) and request.path != '/logout':
+            return redirect(url_for('proveedor_tiendas'))
             
     if current_user.is_authenticated and isinstance(current_user, User):
         customer_prefixes = ('/c/', '/customer/', '/api/c/', '/api/customer/')
@@ -1438,7 +1808,7 @@ def customer_register_view():
         
         if send_verification_email(email, code):
             session['pending_customer_verification_email'] = email
-            flash('Se ha enviado un código de verificación de 6 dígitos a tu correo.', 'success')
+            flash('Código de verificación enviado a tu correo electrónico.', 'success')
             return redirect(url_for('customer_verify_email'))
         else:
             flash('Error al enviar el correo de verificación. Intenta nuevamente.', 'error')
@@ -1528,12 +1898,13 @@ def customer_resend_code():
     db.session.commit()
     
     send_verification_email(pending_email, code)
-    flash('Se ha enviado un nuevo código de verificación a tu correo.', 'success')
+    flash('Nuevo código de verificación enviado a tu correo electrónico.', 'success')
     return redirect(url_for('customer_verify_email'))
 
 
 @app.route('/c/login', methods=['GET', 'POST'])
 @app.route('/customer/login', endpoint='customer_login', methods=['GET', 'POST'])
+@limiter.limit(max_requests=5, window_seconds=60, key='customer_login')
 def customer_login_view():
     if current_user.is_authenticated and isinstance(current_user, Customer):
         return redirect(url_for('customer_stores'))
@@ -1554,14 +1925,146 @@ def customer_login_view():
 
 
 # ============================================================
+# ============================================================
 # SUPPLIER (PROVEEDOR) ROUTES & PORTAL
 # ============================================================
 
+@app.route('/p/register', methods=['GET', 'POST'])
+@app.route('/proveedor/registro', endpoint='proveedor_register', methods=['GET', 'POST'])
+def proveedor_register():
+    if current_user.is_authenticated and isinstance(current_user, Supplier):
+        return redirect(url_for('proveedor_tiendas'))
+        
+    if request.method == 'POST':
+        company_name = request.form.get('company_name', '').strip()
+        contact_name = request.form.get('contact_name', '').strip()
+        phone = request.form.get('phone', '').strip()
+        email = request.form.get('email', '').strip().lower()
+        password = request.form.get('password', '')
+        
+        if not company_name or not contact_name or not email or not password:
+            flash('Por favor completa todos los campos obligatorios.', 'error')
+            return render_template('proveedor_registro.html')
+            
+        if Supplier.query.filter_by(email=email).first():
+            flash('El correo ya se encuentra registrado como proveedor.', 'error')
+            return redirect(url_for('proveedor_register'))
+            
+        code = ''.join([str(secrets.randbelow(10)) for _ in range(6)])
+        verification = SupplierEmailVerification(
+            company_name=company_name,
+            contact_name=contact_name,
+            email=email,
+            phone=phone,
+            password_hash=generate_password_hash(password),
+            code=code,
+            expires_at=datetime.now() + timedelta(minutes=10)
+        )
+        db.session.add(verification)
+        db.session.commit()
+        
+        send_verification_email(email, code)
+        session['pending_supplier_verification_email'] = email
+        flash('Código de verificación enviado a tu correo electrónico.', 'success')
+        return redirect(url_for('proveedor_verify_email'))
+        
+    return render_template('proveedor_registro.html')
+
+
+@app.route('/p/verify-email', methods=['GET', 'POST'])
+@app.route('/proveedor/verificar-email', endpoint='proveedor_verify_email', methods=['GET', 'POST'])
+def proveedor_verify_email():
+    if current_user.is_authenticated and isinstance(current_user, Supplier):
+        return redirect(url_for('proveedor_tiendas'))
+        
+    pending_email = session.get('pending_supplier_verification_email')
+    if not pending_email:
+        flash('No hay verificación de proveedor pendiente. Por favor regístrate.', 'error')
+        return redirect(url_for('proveedor_register'))
+        
+    verification = SupplierEmailVerification.query.filter_by(
+        email=pending_email, verified=False
+    ).order_by(SupplierEmailVerification.created_at.desc()).first()
+    
+    if not verification:
+        session.pop('pending_supplier_verification_email', None)
+        flash('Verificación no encontrada. Por favor regístrate de nuevo.', 'error')
+        return redirect(url_for('proveedor_register'))
+        
+    expired = datetime.now() > verification.expires_at
+    
+    if request.method == 'POST':
+        entered_code = request.form.get('code', '').strip()
+        
+        if expired:
+            flash('El código ha expirado. Solicita uno nuevo.', 'error')
+            return render_template('proveedor_verificar_email.html', email=pending_email, expired=True)
+            
+        if verification.attempts >= 5:
+            flash('Demasiados intentos fallidos. Solicita un nuevo código.', 'error')
+            return render_template('proveedor_verificar_email.html', email=pending_email, expired=True)
+            
+        if entered_code == verification.code:
+            verification.verified = True
+            
+            # Crear proveedor en el sistema
+            supplier = Supplier(
+                company_name=verification.company_name,
+                contact_name=verification.contact_name,
+                email=verification.email,
+                phone=verification.phone,
+                password_hash=verification.password_hash,
+                status='ACTIVO'
+            )
+            db.session.add(supplier)
+            db.session.commit()
+            
+            session.pop('pending_supplier_verification_email', None)
+            login_user(supplier)
+            flash(f'¡Bienvenido a MercAPP, {supplier.company_name}! Tu cuenta de proveedor ha sido verificada.', 'success')
+            return redirect(url_for('proveedor_tiendas'))
+        else:
+            verification.attempts += 1
+            db.session.commit()
+            remaining = 5 - verification.attempts
+            flash(f'Código incorrecto. Te quedan {remaining} intentos.', 'error')
+            
+    return render_template('proveedor_verificar_email.html', email=pending_email, expired=expired)
+
+
+@app.route('/p/resend-code', methods=['POST'])
+@app.route('/proveedor/resend-code', endpoint='proveedor_resend_code', methods=['POST'])
+def proveedor_resend_code():
+    pending_email = session.get('pending_supplier_verification_email')
+    if not pending_email:
+        flash('Sesión de verificación expirada.', 'error')
+        return redirect(url_for('proveedor_register'))
+        
+    verification = SupplierEmailVerification.query.filter_by(
+        email=pending_email, verified=False
+    ).order_by(SupplierEmailVerification.created_at.desc()).first()
+    
+    if not verification:
+        flash('Verificación no encontrada.', 'error')
+        return redirect(url_for('proveedor_register'))
+        
+    code = ''.join([str(secrets.randbelow(10)) for _ in range(6)])
+    verification.code = code
+    verification.attempts = 0
+    verification.expires_at = datetime.now() + timedelta(minutes=10)
+    db.session.commit()
+    
+    send_verification_email(pending_email, code)
+    flash('Nuevo código de verificación enviado a tu correo electrónico.', 'success')
+    return redirect(url_for('proveedor_verify_email'))
+
+
 @app.route('/p/login', methods=['GET', 'POST'])
 @app.route('/proveedor/login', endpoint='proveedor_login', methods=['GET', 'POST'])
+@limiter.limit(max_requests=5, window_seconds=60, key='supplier_login')
 def proveedor_login_view():
     if current_user.is_authenticated and isinstance(current_user, Supplier):
-        return redirect(url_for('proveedor_portal'))
+        return redirect(url_for('proveedor_tiendas'))
         
     if request.method == 'POST':
         email = (request.form.get('email') or '').strip().lower()
@@ -1573,8 +2076,8 @@ def proveedor_login_view():
                 flash('Tu cuenta de proveedor se encuentra inactiva. Contacta al administrador del negocio.', 'error')
                 return render_template('proveedor_login.html')
             login_user(supplier)
-            flash(f'¡Bienvenido al portal, {supplier.company_name}!', 'success')
-            return redirect(url_for('proveedor_portal'))
+            flash(f'¡Bienvenido de nuevo, {supplier.company_name}!', 'success')
+            return redirect(url_for('proveedor_tiendas'))
         else:
             flash('Credenciales de proveedor incorrectas. Verifica tu correo y contraseña.', 'error')
             
@@ -1590,6 +2093,125 @@ def proveedor_logout():
     return redirect(url_for('proveedor_login'))
 
 
+@app.route('/p/tiendas')
+@app.route('/proveedor/tiendas', endpoint='proveedor_tiendas')
+@login_required
+def proveedor_tiendas():
+    if not isinstance(current_user, Supplier):
+        flash('Acceso reservado para proveedores.', 'error')
+        return redirect(url_for('proveedor_login'))
+    stores = Store.query.filter_by(is_active=True).all()
+    return render_template('proveedor_tiendas.html', stores=stores)
+
+
+@app.route('/p/tienda/<int:store_id>/entrega', methods=['GET', 'POST'])
+@app.route('/proveedor/tienda/<int:store_id>/entrega', endpoint='proveedor_registrar_entrega', methods=['GET', 'POST'])
+@login_required
+def proveedor_registrar_entrega(store_id):
+    if not isinstance(current_user, Supplier):
+        flash('Acceso reservado para proveedores.', 'error')
+        return redirect(url_for('proveedor_login'))
+        
+    # P0-6 FIX: Validar que el proveedor pertenezca a la tienda seleccionada
+    if hasattr(current_user, 'store_id') and current_user.store_id and current_user.store_id != store_id:
+        flash('No tienes autorización para registrar entregas en esta tienda.', 'error')
+        return redirect(url_for('proveedor_tiendas'))
+
+    store = db.session.get(Store, store_id)
+    if not store:
+        flash('Tienda no encontrada.', 'error')
+        return redirect(url_for('proveedor_tiendas'))
+        
+    active_session = CashSession.query.filter_by(store_id=store_id, status='abierta').first()
+    
+    if request.method == 'POST':
+        order_number = request.form.get('order_number', '').strip()
+        delivery_date_str = request.form.get('delivery_date')
+        total_amount = int(request.form.get('total_amount', 0) or 0)
+        payment_method = request.form.get('payment_method', 'efectivo_caja')
+        amount_cash = int(request.form.get('amount_cash', 0) or 0)
+        amount_transfer = int(request.form.get('amount_transfer', 0) or 0)
+        notes = request.form.get('notes', '').strip()
+        is_confirmed = request.form.get('is_confirmed') in ('on', 'true', '1')
+        
+        if not is_confirmed:
+            flash('Debes marcar la confirmación obligatoria de entrega antes de enviar.', 'error')
+            return render_template('proveedor_entrega.html', store=store, active_session=active_session, today_str=datetime.now().strftime('%Y-%m-%d'))
+            
+        if not order_number or total_amount <= 0:
+            flash('Por favor indica el número de pedido y un valor total válido.', 'error')
+            return render_template('proveedor_entrega.html', store=store, active_session=active_session, today_str=datetime.now().strftime('%Y-%m-%d'))
+            
+        photo_filename = None
+        if 'invoice_photo' in request.files:
+            file = request.files['invoice_photo']
+            if file and file.filename != '':
+                ALLOWED_INVOICE_EXTS = {'jpg', 'jpeg', 'png', 'webp', 'pdf'}
+                ext = file.filename.rsplit('.', 1)[-1].lower() if '.' in file.filename else ''
+                if ext not in ALLOWED_INVOICE_EXTS:
+                    flash('Tipo de archivo no permitido. Solo se aceptan imágenes (JPG, PNG, WEBP) o PDF.', 'error')
+                    return render_template('proveedor_entrega.html', store=store, active_session=active_session, today_str=datetime.now().strftime('%Y-%m-%d'))
+                photo_filename = f"fac_{store_id}_{int(time.time())}_{secrets.token_hex(3)}.{ext}"
+                upload_dest = os.path.join(UPLOAD_DIR, 'invoices', photo_filename)
+                static_dest = os.path.join(STATIC_IMG_DIR, 'invoices', photo_filename)
+                file.save(upload_dest)
+                try:
+                    import shutil
+                    shutil.copyfile(upload_dest, static_dest)
+                except Exception:
+                    pass
+                    
+        delivery_dt = datetime.now()
+        if delivery_date_str:
+            try:
+                delivery_dt = datetime.strptime(delivery_date_str, '%Y-%m-%d')
+            except ValueError:
+                delivery_dt = datetime.now()
+
+        delivery = SupplierDelivery(
+            supplier_id=current_user.id,
+            store_id=store_id,
+            cash_session_id=active_session.id if active_session else None,
+            order_number=order_number,
+            delivery_date=delivery_dt,
+            total_amount=total_amount,
+            payment_method=payment_method,
+            amount_cash=amount_cash,
+            amount_transfer=amount_transfer,
+            notes=notes,
+            invoice_photo=photo_filename,
+            is_confirmed=True,
+            confirmed_at=datetime.now()
+        )
+        db.session.add(delivery)
+        db.session.commit()
+        
+        cash_msg = f" Se descontaron {format_cop(amount_cash)} del efectivo en caja de hoy en {store.name}." if amount_cash > 0 else ""
+        flash(f'¡Entrega #{order_number} registrada y confirmada exitosamente!{cash_msg}', 'success')
+        return redirect(url_for('proveedor_tiendas'))
+
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    return render_template('proveedor_entrega.html', store=store, active_session=active_session, today_str=today_str)
+
+
+@app.route('/admin/proveedores-entregas')
+@app.route('/proveedores-entregas', endpoint='admin_proveedores_entregas')
+@login_required
+@admin_only
+def admin_proveedores_entregas():
+    deliveries = SupplierDelivery.query.filter_by(store_id=current_user.store_id).order_by(SupplierDelivery.delivery_date.desc()).all()
+    total_cash_out = sum(d.amount_cash or 0 for d in deliveries)
+    total_transfer_out = sum(d.amount_transfer or 0 for d in deliveries)
+    total_overall = sum(d.total_amount or 0 for d in deliveries)
+    return render_template(
+        'admin_proveedores_entregas.html',
+        deliveries=deliveries,
+        total_cash_out=total_cash_out,
+        total_transfer_out=total_transfer_out,
+        total_overall=total_overall
+    )
+
+
 @app.route('/p/portal')
 @app.route('/proveedor/portal', endpoint='proveedor_portal')
 @login_required
@@ -1600,7 +2222,8 @@ def proveedor_portal():
     
     orders = PurchaseOrder.query.filter_by(supplier_id=current_user.id).order_by(PurchaseOrder.created_at.desc()).all()
     invoices = SupplierInvoice.query.filter_by(supplier_id=current_user.id).order_by(SupplierInvoice.due_date.asc()).all()
-    products = Product.query.filter_by(store_id=current_user.store_id, is_active=True).all()
+    sid = current_user.store_id or (Store.query.first().id if Store.query.first() else 1)
+    products = Product.query.filter_by(store_id=sid, is_active=True).all()
     
     total_invoiced = sum(inv.total_amount for inv in invoices)
     total_paid = sum(inv.paid_amount for inv in invoices)
@@ -2048,7 +2671,8 @@ def license():
 
     if request.method == 'POST':
         password = request.form.get('password')
-        if password == 'Foreroyulian321.2026':
+        master_pwd = os.getenv('LICENSE_MASTER_KEY', 'MercAPP-Master-Key-2026')
+        if password == master_pwd:
             license_record.expiration_date = datetime.now() + timedelta(days=60)
             db.session.commit()
             flash('Licencia activada por 60 días más.', 'success')
@@ -2063,7 +2687,8 @@ def license():
 @login_required
 def api_renovar_licencia():
     password = request.form.get('password')
-    if password == 'Foreroyulian321.2026':
+    master_pwd = os.getenv('LICENSE_MASTER_KEY', 'MercAPP-Master-Key-2026')
+    if password == master_pwd:
         license_record = AppLicense.query.first()
         if not license_record:
             license_record = AppLicense(expiration_date=datetime.now() + timedelta(days=60), last_time_checked=datetime.now())
@@ -2885,7 +3510,8 @@ def products_export():
 @app.route('/products/import', methods=['POST'])
 @login_required
 def products_import():
-    """Importar inventario masivo desde archivo CSV."""
+    """Importar inventario masivo desde archivo CSV optimizado para alta velocidad en la nube."""
+    import traceback
     if 'file' not in request.files:
         flash('No se seleccionó ningún archivo.', 'error')
         return redirect(url_for('products'))
@@ -2894,96 +3520,261 @@ def products_import():
     if not file or file.filename == '':
         flash('El archivo está vacío.', 'error')
         return redirect(url_for('products'))
+        
+    filename_lower = file.filename.lower()
+    if filename_lower.endswith(('.xlsx', '.xls')):
+        flash('Has subido un archivo Excel (.xlsx). Por favor guarda tu archivo como "CSV (delimitado por comas o punto y coma)" e inténtalo de nuevo.', 'error')
+        return redirect(url_for('products'))
     
-    if not file.filename.lower().endswith('.csv'):
-        flash('Solo se permiten archivos con extensión .CSV', 'error')
+    if not filename_lower.endswith(('.csv', '.txt')):
+        flash('Formato no compatible. Sube un archivo con extensión .CSV o .TXT.', 'error')
         return redirect(url_for('products'))
     
     try:
-        content = file.stream.read().decode("utf-8-sig")
+        raw_bytes = file.stream.read()
+        if not raw_bytes:
+            flash('El archivo subido está vacío.', 'error')
+            return redirect(url_for('products'))
+            
+        # Decodificación probando UTF-8 con/sin BOM, Windows-1252 (Excel español), Latin-1
+        content = None
+        for enc in ('utf-8-sig', 'utf-8', 'cp1252', 'latin-1', 'iso-8859-1'):
+            try:
+                content = raw_bytes.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+                
+        if content is None:
+            content = raw_bytes.decode('utf-8', errors='replace')
+            
+        # Determinar delimitador (; o , o \t)
+        first_line = content.split('\n')[0] if content else ''
+        if ';' in first_line:
+            delimiter = ';'
+        elif '\t' in first_line:
+            delimiter = '\t'
+        else:
+            delimiter = ','
+            
         stream = io.StringIO(content)
-        dialect = csv.Sniffer().sniff(content[:2048], delimiters=';,')
-        reader = csv.DictReader(stream, dialect=dialect)
+        reader = csv.reader(stream, delimiter=delimiter)
         
-        required_headers = ['Nombre', 'Precio', 'Categoria']
-        for h in required_headers:
-            if h not in reader.fieldnames:
-                flash(f'Formato inválido. El CSV debe tener la columna "{h}".', 'error')
-                return redirect(url_for('products'))
+        # Leer encabezados
+        try:
+            raw_headers = next(reader)
+        except StopIteration:
+            flash('El archivo CSV no contiene datos.', 'error')
+            return redirect(url_for('products'))
+            
+        def clean_h(h):
+            h = (h or '').strip().lower()
+            h = re.sub(r'[áàäâ]', 'a', h)
+            h = re.sub(r'[éèëê]', 'e', h)
+            h = re.sub(r'[íìïî]', 'i', h)
+            h = re.sub(r'[óòöô]', 'o', h)
+            h = re.sub(r'[úùüû]', 'u', h)
+            h = re.sub(r'[^a-z0-9]', '', h)
+            return h
+            
+        header_map = {}
+        for idx, h in enumerate(raw_headers):
+            ch = clean_h(h)
+            if any(k in ch for k in ('nombre', 'producto', 'descripcion', 'item', 'articulo', 'name')):
+                if 'name' not in header_map:
+                    header_map['name'] = idx
+            elif any(k in ch for k in ('precio', 'valor', 'price', 'costo', 'pvp')):
+                if 'price' not in header_map:
+                    header_map['price'] = idx
+            elif any(k in ch for k in ('categoria', 'cat', 'category', 'seccion', 'departamento')):
+                if 'category' not in header_map:
+                    header_map['category'] = idx
+            elif any(k in ch for k in ('codigobarra', 'barcode', 'barra', 'ean', 'upc', 'codigo')):
+                if 'barcode' not in header_map and 'plu' not in ch:
+                    header_map['barcode'] = idx
+            elif any(k in ch for k in ('plu', 'codigoplu')):
+                if 'plu' not in header_map:
+                    header_map['plu'] = idx
+            elif any(k in ch for k in ('stock', 'cantidad', 'existencia', 'inventario', 'cant', 'qty')):
+                if 'stock' not in header_map:
+                    header_map['stock'] = idx
+            elif any(k in ch for k in ('pesable', 'peso', 'granel', 'ventaporpeso')):
+                if 'weight' not in header_map:
+                    header_map['weight'] = idx
+            elif any(k in ch for k in ('unidad', 'medida', 'unidadpeso', 'unit')):
+                if 'unit' not in header_map:
+                    header_map['unit'] = idx
+                
+        if 'name' not in header_map:
+            flash('El archivo debe incluir una columna con el nombre del producto (ej: Nombre, Producto, Descripción).', 'error')
+            return redirect(url_for('products'))
+            
+        # =========================================================================
+        # CARGA PREVIA EN MEMORIA (BATCH) - Reduce roundtrips a la nube de 1000 a 2
+        # =========================================================================
+        store_id = current_user.store_id
+        
+        # 1. Categorías existentes
+        existing_cats = Category.query.filter_by(store_id=store_id).all()
+        categories_cache = {c.name.strip().lower(): c for c in existing_cats}
+        default_cat = existing_cats[0] if existing_cats else None
+        if not default_cat:
+            default_cat = Category(store_id=store_id, name="General", slug="general", display_order=1)
+            db.session.add(default_cat)
+            categories_cache["general"] = default_cat
+            
+        max_cat_order = max([c.display_order or 0 for c in existing_cats], default=1)
+        
+        # 2. Productos existentes de la tienda (en memoria para búsqueda O(1) instantánea)
+        existing_products = Product.query.filter_by(store_id=store_id).all()
+        products_by_barcode = {p.barcode.strip(): p for p in existing_products if p.barcode and p.barcode.strip()}
+        products_by_name = {p.name.strip().lower(): p for p in existing_products if p.name and p.name.strip()}
         
         created_count = 0
         updated_count = 0
         
         for row in reader:
-            name = (row.get('Nombre') or '').strip()
+            if not row or not any(row):
+                continue
+                
+            name_idx = header_map.get('name')
+            name = (row[name_idx] if name_idx is not None and name_idx < len(row) else '').strip()
             if not name:
                 continue
+                
+            name_lower = name.lower()
             
-            barcode = (row.get('CodigoBarras') or '').strip() or None
-            plu_code = (row.get('CodigoPLU') or '').strip() or None
-            price_str = (row.get('Precio') or '').strip()
-            cat_name = (row.get('Categoria') or '').strip()
-            
+            # Precio
+            price = 0
+            price_idx = header_map.get('price')
+            if price_idx is not None and price_idx < len(row):
+                p_str = re.sub(r'[^\d.,]', '', str(row[price_idx])).strip()
+                if p_str:
+                    if '.' in p_str and ',' in p_str:
+                        p_str = p_str.replace('.', '').replace(',', '.')
+                    elif ',' in p_str:
+                        p_str = p_str.replace(',', '.')
+                    elif '.' in p_str:
+                        parts = p_str.split('.')
+                        if len(parts) > 1 and all(len(p) == 3 for p in parts[1:]):
+                            p_str = p_str.replace('.', '')
+                    try:
+                        price = int(round(float(p_str)))
+                    except:
+                        price = 0
+                        
             # Categoría
-            cat_id = None
-            if cat_name:
-                cat = Category.query.filter_by(store_id=current_user.store_id, name=cat_name).first()
-                if not cat:
-                    slug = re.sub(r'[^a-z0-9]', '_', cat_name.lower())
-                    max_order = db.session.query(db.func.max(Category.display_order)).filter_by(store_id=current_user.store_id).scalar() or 0
-                    cat = Category(store_id=current_user.store_id, name=cat_name, slug=slug, display_order=max_order + 1)
-                    db.session.add(cat)
-                    db.session.flush()
-                cat_id = cat.id
-            
-            try:
-                price = int(float(price_str))
-            except:
-                price = 0
+            target_cat = default_cat
+            cat_idx = header_map.get('category')
+            if cat_idx is not None and cat_idx < len(row):
+                cat_name = (row[cat_idx] or '').strip()
+                if cat_name:
+                    cn_lower = cat_name.lower()
+                    if cn_lower in categories_cache:
+                        target_cat = categories_cache[cn_lower]
+                    else:
+                        slug = re.sub(r'[^a-z0-9]', '_', cn_lower)[:40] or 'cat'
+                        max_cat_order += 1
+                        new_cat = Category(store_id=store_id, name=cat_name[:50], slug=slug, display_order=max_cat_order)
+                        db.session.add(new_cat)
+                        categories_cache[cn_lower] = new_cat
+                        target_cat = new_cat
+                        
+            # Código de barras / PLU
+            barcode = None
+            barcode_idx = header_map.get('barcode')
+            if barcode_idx is not None and barcode_idx < len(row):
+                b_val = (row[barcode_idx] or '').strip()
+                barcode = b_val if b_val else None
                 
-            stock_str = (row.get('Stock') or '').strip()
-            stock_val = int(float(stock_str)) if stock_str else None
-            sell_by_weight = (row.get('VentaPorPeso') or '').lower() == 'si'
-            weight_unit = (row.get('UnidadPeso') or 'kg').lower()
-            if weight_unit not in ('kg', 'lb'):
-                weight_unit = 'kg'
+            plu_code = None
+            plu_idx = header_map.get('plu')
+            if plu_idx is not None and plu_idx < len(row):
+                plu_val = (row[plu_idx] or '').strip()
+                plu_code = plu_val if plu_val else None
                 
+            # Stock
+            stock_val = None
+            stock_idx = header_map.get('stock')
+            if stock_idx is not None and stock_idx < len(row):
+                s_str = re.sub(r'[^\d]', '', str(row[stock_idx])).strip()
+                if s_str:
+                    try:
+                        stock_val = int(s_str)
+                    except:
+                        stock_val = None
+                        
+            # Venta por peso
+            sell_by_weight = False
+            w_idx = header_map.get('weight')
+            if w_idx is not None and w_idx < len(row):
+                w_str = (row[w_idx] or '').strip().lower()
+                sell_by_weight = w_str in ('si', 's', 'true', '1', 'yes', 'y')
+                
+            unit_val = 'kg'
+            u_idx = header_map.get('unit')
+            if u_idx is not None and u_idx < len(row):
+                u_str = (row[u_idx] or '').strip().lower()
+                if u_str in ('lb', 'libra', 'libras'):
+                    unit_val = 'lb'
+                    
+            # Búsqueda en memoria instantánea (sin roundtrips SQL)
             product = None
-            if barcode:
-                product = Product.query.filter_by(store_id=current_user.store_id, barcode=barcode).first()
-            
+            if barcode and barcode in products_by_barcode:
+                product = products_by_barcode[barcode]
+            elif name_lower in products_by_name:
+                product = products_by_name[name_lower]
+                
             if product:
                 product.name = name
                 product.price = price
-                product.plu_code = plu_code
-                if cat_id:
-                    product.category_id = cat_id
-                product.stock = stock_val
+                if barcode:
+                    product.barcode = barcode
+                    product.has_barcode = True
+                    products_by_barcode[barcode] = product
+                if plu_code:
+                    product.plu_code = plu_code
+                if target_cat.id:
+                    product.category_id = target_cat.id
+                else:
+                    product.category = target_cat
+                if stock_val is not None:
+                    product.stock = stock_val
                 product.sell_by_weight = sell_by_weight
-                product.weight_unit = weight_unit
+                product.weight_unit = unit_val
                 updated_count += 1
             else:
                 new_p = Product(
-                    store_id=current_user.store_id,
+                    store_id=store_id,
                     name=name,
                     barcode=barcode,
                     plu_code=plu_code,
                     price=price,
-                    category_id=cat_id or 1,
                     stock=stock_val,
                     sell_by_weight=sell_by_weight,
-                    weight_unit=weight_unit,
+                    weight_unit=unit_val,
                     has_barcode=True if barcode else False,
                     is_active=True
                 )
+                if target_cat.id:
+                    new_p.category_id = target_cat.id
+                else:
+                    new_p.category = target_cat
+                    
                 db.session.add(new_p)
+                if barcode:
+                    products_by_barcode[barcode] = new_p
+                products_by_name[name_lower] = new_p
                 created_count += 1
                 
+        # Un único commit al final para guardar todos los registros
         db.session.commit()
         log_audit('PRODUCTS_IMPORT', f'Importación masiva: {created_count} creados, {updated_count} actualizados', current_user.id)
-        flash(f'¡Importación completada! Creados: {created_count}, Actualizados: {updated_count}', 'success')
+        flash(f'¡Inventario importado exitosamente! Productos creados: {created_count}, actualizados: {updated_count}', 'success')
     except Exception as e:
         db.session.rollback()
+        print("[IMPORT ERROR] Traceback:")
+        print(traceback.format_exc())
         flash(f'Error al procesar el archivo CSV: {str(e)}', 'error')
         
     return redirect(url_for('products'))
@@ -3223,7 +4014,7 @@ def audit():
         flash('Acceso restringido a administradores.', 'error')
         return redirect(url_for('products'))
     
-    logs = AuditLog.query.order_by(AuditLog.created_at.desc()).all()
+    logs = AuditLog.query.order_by(AuditLog.created_at.desc()).limit(200).all()
     
     session_actions = ['LOGIN', 'LOGOUT', 'REGISTER', 'LOGIN_FAILED', 'LOGIN_BLOCKED', 'ACCOUNT_LOCKED']
     session_count = sum(1 for l in logs if l.action in session_actions)
@@ -3330,7 +4121,14 @@ def session_close():
     cash = sum(s.amount_cash or 0 for s in sales_in_session)
     card = sum(s.amount_card or 0 for s in sales_in_session)
     transfer = sum(s.amount_transfer or 0 for s in sales_in_session)
-    expected_cash = active_session.base_amount + cash
+    # P1-5 FIX: Deducir pagos a proveedores realizados en efectivo durante el turno
+    supplier_cash_out = db.session.query(
+        func.coalesce(func.sum(SupplierDelivery.amount_cash), 0)
+    ).filter(
+        SupplierDelivery.cash_session_id == active_session.id
+    ).scalar() or 0
+
+    expected_cash = active_session.base_amount + cash - supplier_cash_out
     
     if request.method == 'POST':
         actual = request.form.get('actual_cash', '0')
@@ -3456,10 +4254,10 @@ def sales_history():
     if method_filter:
         query = query.filter_by(payment_method=method_filter)
         
-    all_filtered = query.all()
-    total_ventas = sum(s.total for s in all_filtered if s.status == 'completada')
-    count_ventas = sum(1 for s in all_filtered if s.status == 'completada')
-    count_anuladas = sum(1 for s in all_filtered if s.status == 'anulada')
+    # P1 FIX #10: Agregaciones nativas SQL para evitar cargar decenas de miles de objetos en memoria
+    total_ventas = int(query.filter(Sale.status == 'completada').with_entities(func.coalesce(func.sum(Sale.total), 0)).scalar() or 0)
+    count_ventas = query.filter(Sale.status == 'completada').count()
+    count_anuladas = query.filter(Sale.status == 'anulada').count()
     
     sales = query.order_by(Sale.sale_date.desc()).paginate(page=page, per_page=20, error_out=False)
     
@@ -3539,6 +4337,30 @@ def sales_export():
         mimetype='text/csv',
         headers={'Content-Disposition': f'attachment; filename=ventas_{datetime.now().strftime("%Y%m%d")}.csv'}
     )
+
+@app.route('/admin/backup')
+@login_required
+@admin_only
+def admin_backup_database():
+    """P3 FIX #19: Generar y descargar respaldo completo de base de datos."""
+    try:
+        from utilities.backup_service import BackupService
+        db_uri = app.config.get('SQLALCHEMY_DATABASE_URI', '')
+        if 'sqlite:///' in db_uri:
+            db_filepath = db_uri.replace('sqlite:///', '')
+            if os.path.exists(db_filepath):
+                backup_file = BackupService.create_sqlite_backup(db_filepath)
+                return send_file(backup_file, as_attachment=True, download_name=os.path.basename(backup_file))
+        
+        # Modo Cloud / MySQL: volcado JSON de datos de la tienda
+        data = BackupService.export_store_data_json(current_user.store_id)
+        buf = io.BytesIO(json.dumps(data, indent=2, ensure_ascii=False).encode('utf-8'))
+        filename = f"mercapp_backup_store_{current_user.store_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        return send_file(buf, as_attachment=True, download_name=filename, mimetype='application/json')
+    except Exception as e_bk:
+        flash(f'Error al generar copia de seguridad: {e_bk}', 'error')
+        return redirect(url_for('pos'))
+
 
 
 # ============================================================
@@ -4682,9 +5504,11 @@ from controllers.sale_controller import sale_controller
 from controllers.merki_controller import merki_controller
 
 app.register_blueprint(user_controller)
+csrf.exempt(user_controller)  # API JSON usa autenticación por sesión, no tokens CSRF
 app.register_blueprint(product_controller)
 app.register_blueprint(sale_controller)
 app.register_blueprint(merki_controller)
+csrf.exempt(merki_controller)  # API JSON exenta de CSRF
 
 
 # ============================================================
@@ -5341,6 +6165,84 @@ def api_health():
 # STARTUP
 # ============================================================
 
+
+# ============================================================
+# REPORTES EN EXCEL — Criterio F Sustentación
+# ============================================================
+@app.route('/api/reports/sales', methods=['GET'])
+@login_required
+def api_report_sales_excel():
+    """Genera y descarga reporte de ventas en Excel (.xlsx) con formato profesional."""
+    from utilities.report_generator import generate_sales_report_excel
+    store_id = current_user.store_id if hasattr(current_user, 'store_id') else 1
+    store = db.session.get(Store, store_id)
+    store_name = store.name if store else 'MercAPP'
+
+    date_from = request.args.get('from')
+    date_to = request.args.get('to')
+    query = Sale.query.filter_by(store_id=store_id).order_by(Sale.sale_date.desc())
+
+    if date_from:
+        try:
+            query = query.filter(Sale.sale_date >= datetime.strptime(date_from, '%Y-%m-%d'))
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            query = query.filter(Sale.sale_date <= datetime.strptime(date_to, '%Y-%m-%d') + timedelta(days=1))
+        except ValueError:
+            pass
+
+    sales = query.limit(500).all()
+    sales_data = []
+    for s in sales:
+        cashier_name = ''
+        if s.cashier:
+            cashier_name = s.cashier.name
+        sales_data.append({
+            'receipt_number': s.receipt_number,
+            'date': s.sale_date.strftime('%d/%m/%Y %H:%M') if s.sale_date else '',
+            'cashier': cashier_name,
+            'payment_method': s.payment_method or '',
+            'subtotal': s.subtotal or 0,
+            'total': s.total or 0,
+            'status': s.status or 'completada'
+        })
+
+    period = f"{date_from or 'inicio'} a {date_to or 'hoy'}"
+    output = generate_sales_report_excel(sales_data, store_name, period)
+    filename = f"MercAPP_Ventas_{store_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return send_file(output, as_attachment=True, download_name=filename,
+                     mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+
+@app.route('/api/reports/inventory', methods=['GET'])
+@login_required
+def api_report_inventory_excel():
+    """Genera y descarga reporte de inventario en Excel (.xlsx) con formato profesional."""
+    from utilities.report_generator import generate_inventory_report_excel
+    store_id = current_user.store_id if hasattr(current_user, 'store_id') else 1
+    store = db.session.get(Store, store_id)
+    store_name = store.name if store else 'MercAPP'
+
+    products = Product.query.filter_by(store_id=store_id, is_active=True).all()
+    products_data = []
+    for p in products:
+        cat_name = p.category.name if p.category else 'Sin categoría'
+        products_data.append({
+            'name': p.name,
+            'barcode': p.barcode or '',
+            'category': cat_name,
+            'price': p.price or 0,
+            'stock': p.stock if p.stock is not None else 0
+        })
+
+    output = generate_inventory_report_excel(products_data, store_name)
+    filename = f"MercAPP_Inventario_{store_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return send_file(output, as_attachment=True, download_name=filename,
+                     mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
@@ -5408,4 +6310,8 @@ if __name__ == '__main__':
             print(f"[SEED] Categorías por defecto creadas para {len(stores_without_cats)} tienda(s).")
         start_email_queue_sync_daemon()
         
-    app.run(debug=True, port=5001)
+        # P1 FIX #12: debug seguro, condicionado a variable de entorno (evita ejecucion remota de codigo en produccion)
+    _is_debug = os.getenv('FLASK_DEBUG', 'False').lower() in ('1', 'true', 'yes')
+    _port = int(os.getenv('PORT', 5001))
+    _host = '0.0.0.0' if (os.getenv('RENDER') or os.getenv('HOST')) else '127.0.0.1'
+    app.run(debug=_is_debug, host=_host, port=_port)

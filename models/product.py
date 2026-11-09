@@ -4,7 +4,7 @@ from models.database import db
 class Category(db.Model):
     __tablename__ = 'categoria'
     id = db.Column(db.Integer, primary_key=True)
-    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False)
+    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False, index=True)
     name = db.Column(db.String(50), nullable=False)
     slug = db.Column(db.String(50), nullable=False)
     image = db.Column(db.String(200), default='default_category.png')
@@ -19,10 +19,10 @@ class Category(db.Model):
 class Subcategory(db.Model):
     __tablename__ = 'subcategoria'
     id = db.Column(db.Integer, primary_key=True)
-    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False)
+    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False, index=True)
     name = db.Column(db.String(50), nullable=False)
     slug = db.Column(db.String(50), nullable=False)
-    category_id = db.Column(db.Integer, db.ForeignKey('categoria.id'), nullable=False)
+    category_id = db.Column(db.Integer, db.ForeignKey('categoria.id'), nullable=False, index=True)
     image = db.Column(db.String(200), default='default_subcategory.png')
     display_order = db.Column(db.Integer, default=0)
     
@@ -32,11 +32,11 @@ class Subcategory(db.Model):
 class Product(db.Model):
     __tablename__ = 'producto'
     id = db.Column(db.Integer, primary_key=True)
-    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False)
+    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False, index=True)
     name = db.Column(db.String(150), nullable=False)
-    barcode = db.Column(db.String(60), nullable=True)
+    barcode = db.Column(db.String(60), nullable=True, index=True)
     price = db.Column(db.Integer, nullable=False)
-    category_id = db.Column(db.Integer, db.ForeignKey('categoria.id'), nullable=False)
+    category_id = db.Column(db.Integer, db.ForeignKey('categoria.id'), nullable=False, index=True)
     subcategory_id = db.Column(db.Integer, db.ForeignKey('subcategoria.id'), nullable=True)
     image = db.Column(db.String(200), default='default_product.png')
     has_barcode = db.Column(db.Boolean, default=False)

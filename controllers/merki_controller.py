@@ -15,12 +15,21 @@ _recognizer.dynamic_energy_threshold = False
 
 
 @merki_controller.route('/merki/ask', methods=['POST'])
+@login_required
 def ask_merki():
     """
     POST /api/merki/ask
     Recibe la pregunta en lenguaje natural y retorna la respuesta procesada por Merki.
-    Payload: { "question": "¿Cuánto cuesta el arroz Diana?" }
+    P0-4 FIX: Requiere autenticación y vincula estrictamente la consulta a la tienda del usuario.
     """
+    user_store_id = getattr(current_user, 'store_id', None)
+    if not user_store_id:
+        return jsonify({
+            "success": False,
+            "error": "Acceso denegado. Se requiere una tienda asociada.",
+            "data": None
+        }), 403
+
     data = request.get_json() or {}
     question = data.get('question', '').strip()
 
@@ -32,23 +41,19 @@ def ask_merki():
             "data": None
         })
 
-    # Determinar store_id: del usuario en sesión o del payload
-    store_id = None
-    if current_user and current_user.is_authenticated:
-        store_id = getattr(current_user, 'store_id', None)
-
-    if not store_id:
-        store_id = data.get('store_id', 1)
+    # P0-4 FIX: store_id se deriva estrictamente del usuario autenticado
+    store_id = user_store_id
 
     try:
         result = MerkiService.process_question(store_id=store_id, raw_question=question)
         return jsonify(result)
     except Exception as e:
+        import logging
+        logging.getLogger("merki").warning(f"Error en ask_merki: {e}")
         return jsonify({
             "success": False,
             "intent": "error",
             "response": "Disculpa, de momento no cuento con esa información pero puedes consultar con uno de nuestros administradores.",
-            "error": str(e),
             "data": None
         }), 200
 
@@ -59,11 +64,11 @@ def get_merki_suggestions():
     GET /api/merki/suggestions?store_id=X
     Retorna chips de sugerencias dinámicas adaptadas al negocio activo.
     """
-    store_id = request.args.get('store_id', type=int)
-    if not store_id and current_user and current_user.is_authenticated:
+    store_id = None
+    if current_user and current_user.is_authenticated:
         store_id = getattr(current_user, 'store_id', None)
     if not store_id:
-        store_id = 1
+        store_id = request.args.get('store_id', 1, type=int)
 
     suggestions = MerkiService.get_dynamic_suggestions(store_id)
     return jsonify({
@@ -74,13 +79,24 @@ def get_merki_suggestions():
 
 
 @merki_controller.route('/merki/transcribe', methods=['POST'])
+@login_required
 def transcribe_merki_audio():
     """
     POST /api/merki/transcribe
     Recibe un archivo de audio WAV en form-data 'audio' o body binario,
-    lo transcribe a texto en español y, en una sola llamada de ultra baja latencia,
-    procesa y retorna la respuesta inteligente de Merki.
+    lo transcribe a texto en español y procesa la respuesta inteligente de Merki.
+    P0-4 FIX: Requiere autenticación y deriva store_id del usuario en sesión.
     """
+    user_store_id = getattr(current_user, 'store_id', None)
+    if not user_store_id:
+        return jsonify({
+            "success": False,
+            "error": "Acceso denegado. Se requiere una tienda asociada.",
+            "data": None
+        }), 403
+
+    store_id = user_store_id
+
     audio_file = request.files.get('audio')
     audio_bytes = None
     if audio_file:
@@ -91,25 +107,18 @@ def transcribe_merki_audio():
     if not audio_bytes or len(audio_bytes) < 600:
         return jsonify({"success": True, "text": "", "empty": True, "message": "Audio muy corto o vacío"})
 
-    # Determinar store_id
-    store_id = request.form.get('store_id', type=int) or request.args.get('store_id', type=int)
-    if not store_id and current_user and current_user.is_authenticated:
-        store_id = getattr(current_user, 'store_id', None)
-    if not store_id:
-        store_id = 1
-
     try:
         with sr.AudioFile(io.BytesIO(audio_bytes)) as source:
             audio_data = _recognizer.record(source)
 
         transcript = ""
         try:
-            # Reconocimiento directo de un solo paso en español colombiano (es-CO)
             transcript = _recognizer.recognize_google(audio_data, language='es-CO')
         except sr.UnknownValueError:
             transcript = ""
         except Exception as stt_err:
-            print(f"[Merki STT recognize_google error] {stt_err}")
+            import logging
+            logging.getLogger("merki").warning(f"[Merki STT error] {stt_err}")
             transcript = ""
 
         transcript = transcript.strip()
@@ -120,7 +129,6 @@ def transcribe_merki_audio():
                 "empty": True
             })
 
-        # Procesar de inmediato la pregunta en el backend para recortar la latencia a la mitad
         result = MerkiService.process_question(store_id=store_id, raw_question=transcript)
 
         return jsonify({
@@ -132,12 +140,10 @@ def transcribe_merki_audio():
             "data": result.get("data")
         })
     except Exception as e:
-        print(f"[Merki Transcribe Error] {type(e).__name__}: {e}")
+        import logging
+        logging.getLogger("merki").warning(f"Error procesando audio Merki: {e}")
         return jsonify({
             "success": False,
-            "error": str(e),
+            "error": "No fue posible procesar el audio. Por favor intenta de nuevo.",
             "text": ""
         }), 200
-
-
-

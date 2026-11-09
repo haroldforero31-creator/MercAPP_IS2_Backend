@@ -15,3 +15,9 @@ logs/
 MercAPP_IS2_Windows/
 *.db-shm
 *.db-wal
+.coverage
+htmlcov/
+test_smoke.db
+test_stress.db
+.secret_key
+instance/

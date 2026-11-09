@@ -4,7 +4,7 @@ from models.database import db
 class CashSession(db.Model):
     __tablename__ = 'sesion_caja'
     id = db.Column(db.Integer, primary_key=True)
-    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False)
+    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False, index=True)
     user_id = db.Column(db.Integer, db.ForeignKey('usuario.id'), nullable=False)
     opened_at = db.Column(db.DateTime, default=datetime.now)
     closed_at = db.Column(db.DateTime, nullable=True)
@@ -21,12 +21,12 @@ class CashSession(db.Model):
 class Sale(db.Model):
     __tablename__ = 'venta'
     id = db.Column(db.Integer, primary_key=True)
-    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False)
-    cash_session_id = db.Column(db.Integer, db.ForeignKey('sesion_caja.id'), nullable=True)
+    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False, index=True)
+    cash_session_id = db.Column(db.Integer, db.ForeignKey('sesion_caja.id'), nullable=True, index=True)
     credit_client_id = db.Column(db.Integer, db.ForeignKey('cliente_credito.id'), nullable=True)
-    receipt_number = db.Column(db.String(30), nullable=False)
+    receipt_number = db.Column(db.String(30), nullable=False, unique=True, index=True)
     user_id = db.Column(db.Integer, db.ForeignKey('usuario.id'), nullable=False)
-    sale_date = db.Column(db.DateTime, default=datetime.now)
+    sale_date = db.Column(db.DateTime, default=datetime.now, index=True)
     subtotal = db.Column(db.Integer, nullable=False)
     total = db.Column(db.Integer, nullable=False)
     payment_method = db.Column(db.String(20), nullable=False)  # efectivo, tarjeta, transferencia, fiado, mixto
@@ -145,7 +145,7 @@ class Order(db.Model):
     """Storefront Delivery/Pickup Orders."""
     __tablename__ = 'pedido'
     id = db.Column(db.Integer, primary_key=True)
-    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False)
+    store_id = db.Column(db.Integer, db.ForeignKey('tienda.id'), nullable=False, index=True)
     customer_id = db.Column(db.Integer, db.ForeignKey('cliente.id'), nullable=True)
     user_id = db.Column(db.Integer, db.ForeignKey('usuario.id'), nullable=True)
     sale_id = db.Column(db.Integer, db.ForeignKey('venta.id'), nullable=True)

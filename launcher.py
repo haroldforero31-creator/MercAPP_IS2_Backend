@@ -20,7 +20,7 @@ def is_port_in_use(port, host='127.0.0.1'):
         s.settimeout(0.5)
         return s.connect_ex((host, port)) == 0
 
-def find_available_port(preferred_port=5001):
+def find_available_port(preferred_port=5000):
     """Find a usable port starting from the preferred port."""
     port = preferred_port
     while port < preferred_port + 20:
@@ -127,7 +127,7 @@ def wait_for_server(port, timeout=12):
 
 def open_desktop_window(port):
     """Open MercAPP as a standalone native desktop window or standard browser tab."""
-    target_url = f"http://127.0.0.1:{port}/pos"
+    target_url = f"http://127.0.0.1:{port}/"
     wait_for_server(port)
     browser_exe = get_browser_path()
     if browser_exe:
@@ -144,13 +144,13 @@ if __name__ == '__main__':
     if env_port and env_port.isdigit():
         port = int(env_port)
     else:
-        port = find_available_port(5001)
+        port = find_available_port(5000)
 
     os.environ['PORT'] = str(port)
     print("=" * 60)
     print("  MercAPP IS2 — Sistema de Punto de Venta y Gestión")
     print(f"  Modo: Autónomo Local (Offline-first)")
-    print(f"  URL:  http://127.0.0.1:{port}/pos")
+    print(f"  URL:  http://127.0.0.1:{port}/")
     print("=" * 60)
 
     # Initialize local SQLite DB

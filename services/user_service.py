@@ -85,10 +85,26 @@ class UserService:
             return None, validation_errors
 
         user = UserRepository.get_by_email(dto.email)
-        if not user or not verify_password(dto.password, user.password_hash):
+        if not user:
+            return None, "Credenciales incorrectas."
+
+        # P1-1 FIX: Validar si la cuenta está bloqueada por demasiados intentos fallidos
+        if getattr(user, 'status', None) == 'BLOQUEADO' or (getattr(user, 'failed_attempts', 0) or 0) >= 5:
+            return None, "Cuenta bloqueada por demasiados intentos fallidos. Contacta al administrador."
+
+        if not verify_password(dto.password, user.password_hash):
+            user.failed_attempts = (getattr(user, 'failed_attempts', 0) or 0) + 1
+            if user.failed_attempts >= 5:
+                user.status = 'BLOQUEADO'
+            from models.database import db
+            db.session.commit()
             return None, "Credenciales incorrectas."
 
         if user.status != 'ACTIVO':
             return None, f"La cuenta se encuentra en estado '{user.status}'."
+
+        user.failed_attempts = 0
+        from models.database import db
+        db.session.commit()
 
         return UserResponseDTO.from_model(user), None
