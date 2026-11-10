@@ -74,15 +74,24 @@ class CreditClient(db.Model):
 
     @property
     def total_debt(self):
-        return sum(cs.balance for cs in self.credit_sales if cs.status == 'pendiente')
+        try:
+            return sum((cs.balance or 0) for cs in self.credit_sales if cs.status == 'pendiente')
+        except Exception:
+            return 0
 
     @property
     def total_purchased(self):
-        return sum(cs.amount for cs in self.credit_sales)
+        try:
+            return sum((cs.amount or 0) for cs in self.credit_sales)
+        except Exception:
+            return 0
 
     @property
     def total_paid(self):
-        return sum(p.amount for p in self.payments)
+        try:
+            return sum((p.amount or 0) for p in self.payments)
+        except Exception:
+            return 0
 
     @property
     def debt_status(self):
@@ -91,22 +100,32 @@ class CreditClient(db.Model):
     @property
     def last_activity_date(self):
         """Fecha del último abono o, si no hay abonos, de la deuda más antigua pendiente."""
-        if self.payments:
-            return max(p.payment_date for p in self.payments)
-        pending = [cs for cs in self.credit_sales if cs.status == 'pendiente']
-        if pending:
-            return min(cs.created_at for cs in pending)
-        return self.created_at
+        try:
+            if self.payments:
+                valid_dates = [p.payment_date for p in self.payments if getattr(p, 'payment_date', None)]
+                if valid_dates:
+                    return max(valid_dates)
+            pending_dates = [cs.created_at for cs in self.credit_sales if cs.status == 'pendiente' and getattr(cs, 'created_at', None)]
+            if pending_dates:
+                return min(pending_dates)
+        except Exception:
+            pass
+        return self.created_at or datetime.now()
 
     @property
     def days_without_payment(self):
         """Días transcurridos sin hacer al menos un abono a la deuda pendiente."""
-        if self.total_debt <= 0:
-            return 0
-        now = datetime.now()
-        last_date = self.last_activity_date
-        if last_date:
-            return max(0, (now - last_date).days)
+        try:
+            if self.total_debt <= 0:
+                return 0
+            now = datetime.now()
+            last_date = self.last_activity_date
+            if last_date:
+                if getattr(last_date, 'tzinfo', None) is not None:
+                    last_date = last_date.replace(tzinfo=None)
+                return max(0, (now - last_date).days)
+        except Exception:
+            pass
         return 0
 
     @property

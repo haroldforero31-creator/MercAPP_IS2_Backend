@@ -2757,183 +2757,197 @@ def api_renovar_licencia():
 @admin_only
 def dashboard():
     """Dashboard Integral 360° del Supermercado."""
-    store_id = current_user.store_id
-    now = datetime.now()
-    period = request.args.get('period', 'today')
+    try:
+        store_id = getattr(current_user, 'store_id', 1) or 1
+        now = datetime.now()
+        period = request.args.get('period', 'today')
 
-    # 1. Definición de rangos según periodo
-    if period == 'week':
-        start_date = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-        end_date = now
-        period_label = 'Esta Semana'
-        prev_start = start_date - timedelta(days=7)
-        prev_end = start_date - timedelta(seconds=1)
-        prev_label = 'vs. semana anterior'
-    elif period == 'month':
-        start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        end_date = now
-        period_label = 'Este Mes'
-        first_this_month = start_date
-        last_prev_month = first_this_month - timedelta(days=1)
-        prev_start = last_prev_month.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        prev_end = last_prev_month.replace(hour=23, minute=59, second=59, microsecond=999999)
-        prev_label = 'vs. mes anterior'
-    else:
-        period = 'today'
-        start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        end_date = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-        period_label = 'Hoy'
-        prev_start = start_date - timedelta(days=1)
-        prev_end = start_date - timedelta(seconds=1)
-        prev_label = 'vs. ayer'
+        # 1. Definición de rangos según periodo
+        if period == 'week':
+            start_date = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+            end_date = now
+            period_label = 'Esta Semana'
+            prev_start = start_date - timedelta(days=7)
+            prev_end = start_date - timedelta(seconds=1)
+            prev_label = 'vs. semana anterior'
+        elif period == 'month':
+            start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            end_date = now
+            period_label = 'Este Mes'
+            first_this_month = start_date
+            last_prev_month = first_this_month - timedelta(days=1)
+            prev_start = last_prev_month.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            prev_end = last_prev_month.replace(hour=23, minute=59, second=59, microsecond=0)
+            prev_label = 'vs. mes anterior'
+        else:
+            period = 'today'
+            start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_date = now.replace(hour=23, minute=59, second=59, microsecond=0)
+            period_label = 'Hoy'
+            prev_start = start_date - timedelta(days=1)
+            prev_end = start_date - timedelta(seconds=1)
+            prev_label = 'vs. ayer'
 
-    # 2. Ventas del periodo seleccionado
-    sales = Sale.query.filter(
-        Sale.store_id == store_id,
-        Sale.sale_date >= start_date,
-        Sale.sale_date <= end_date,
-        Sale.status == 'completada'
-    ).all()
-
-    total_sales = sum(s.total for s in sales)
-    sales_count = len(sales)
-    avg_ticket = int(total_sales / sales_count) if sales_count > 0 else 0
-
-    # 3. Ventas periodo anterior para cálculo de variación
-    prev_sales = Sale.query.filter(
-        Sale.store_id == store_id,
-        Sale.sale_date >= prev_start,
-        Sale.sale_date <= prev_end,
-        Sale.status == 'completada'
-    ).all()
-    prev_total = sum(s.total for s in prev_sales)
-    if prev_total > 0:
-        growth_pct = round(((total_sales - prev_total) / prev_total) * 100, 1)
-    else:
-        growth_pct = 100.0 if total_sales > 0 else 0.0
-
-    # 4. Desglose de métodos de pago en el periodo
-    cash_total = sum(
-        (s.amount_cash if s.payment_method == 'mixto' and s.amount_cash else s.total)
-        for s in sales if s.payment_method in ('efectivo', 'mixto')
-    )
-    transfer_total = sum(
-        (s.amount_transfer if s.payment_method == 'mixto' and s.amount_transfer else s.total)
-        for s in sales if s.payment_method in ('transferencia', 'mixto')
-    )
-    card_total = sum(
-        (s.amount_card if s.payment_method == 'mixto' and s.amount_card else s.total)
-        for s in sales if s.payment_method in ('tarjeta', 'mixto')
-    )
-    credit_total = sum(s.total for s in sales if s.payment_method == 'fiado')
-
-    payment_breakdown = {
-        'efectivo': {'amount': cash_total, 'pct': round((cash_total / total_sales * 100), 1) if total_sales > 0 else 0},
-        'transferencia': {'amount': transfer_total, 'pct': round((transfer_total / total_sales * 100), 1) if total_sales > 0 else 0},
-        'tarjeta': {'amount': card_total, 'pct': round((card_total / total_sales * 100), 1) if total_sales > 0 else 0},
-        'fiado': {'amount': credit_total, 'pct': round((credit_total / total_sales * 100), 1) if total_sales > 0 else 0},
-    }
-
-    # 5. Serie temporal para gráfica de tendencia (últimos días)
-    trend_data = []
-    days_back = 7 if period in ('today', 'week') else 14
-    day_names_es = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom']
-    for i in range(days_back - 1, -1, -1):
-        day_date = (now - timedelta(days=i)).date()
-        d_start = datetime.combine(day_date, datetime.min.time())
-        d_end = datetime.combine(day_date, datetime.max.time())
-        d_sales = Sale.query.filter(
+        # 2. Ventas del periodo seleccionado
+        sales = Sale.query.filter(
             Sale.store_id == store_id,
-            Sale.sale_date >= d_start,
-            Sale.sale_date <= d_end,
+            Sale.sale_date >= start_date,
+            Sale.sale_date <= end_date,
             Sale.status == 'completada'
         ).all()
-        trend_data.append({
-            'date_str': day_date.strftime('%d/%m'),
-            'day_name': day_names_es[day_date.weekday()],
-            'total': sum(s.total for s in d_sales),
-            'count': len(d_sales)
-        })
 
-    # 6. Top 5 Productos estrella (más vendidos en el periodo)
-    top_products_query = db.session.query(
-        Product.id,
-        Product.name,
-        Category.name.label('cat_name'),
-        Product.price,
-        Product.stock,
-        func.sum(SaleItem.quantity).label('qty_sold'),
-        func.sum(SaleItem.subtotal).label('revenue')
-    ).join(SaleItem, SaleItem.product_id == Product.id)\
-     .join(Sale, Sale.id == SaleItem.sale_id)\
-     .outerjoin(Category, Category.id == Product.category_id)\
-     .filter(
-         Product.store_id == store_id,
-         Sale.sale_date >= start_date,
-         Sale.sale_date <= end_date,
-         Sale.status == 'completada'
-     ).group_by(Product.id)\
-     .order_by(desc('qty_sold'))\
-     .limit(5).all()
+        total_sales = sum((s.total or 0) for s in sales)
+        sales_count = len(sales)
+        avg_ticket = int(total_sales / sales_count) if sales_count > 0 else 0
 
-    top_products = [
-        {
-            'id': p.id,
-            'name': p.name,
-            'category': p.cat_name or 'General',
-            'price': p.price,
-            'stock': p.stock if p.stock is not None else 'N/A',
-            'qty_sold': int(p.qty_sold),
-            'revenue': int(p.revenue)
+        # 3. Ventas periodo anterior para cálculo de variación
+        prev_sales = Sale.query.filter(
+            Sale.store_id == store_id,
+            Sale.sale_date >= prev_start,
+            Sale.sale_date <= prev_end,
+            Sale.status == 'completada'
+        ).all()
+        prev_total = sum((s.total or 0) for s in prev_sales)
+        if prev_total > 0:
+            growth_pct = round(((total_sales - prev_total) / prev_total) * 100, 1)
+        else:
+            growth_pct = 100.0 if total_sales > 0 else 0.0
+
+        # 4. Desglose de métodos de pago en el periodo
+        cash_total = sum(
+            (s.amount_cash if s.payment_method == 'mixto' and s.amount_cash else (s.total or 0))
+            for s in sales if s.payment_method in ('efectivo', 'mixto')
+        )
+        transfer_total = sum(
+            (s.amount_transfer if s.payment_method == 'mixto' and s.amount_transfer else (s.total or 0))
+            for s in sales if s.payment_method in ('transferencia', 'mixto')
+        )
+        card_total = sum(
+            (s.amount_card if s.payment_method == 'mixto' and s.amount_card else (s.total or 0))
+            for s in sales if s.payment_method in ('tarjeta', 'mixto')
+        )
+        credit_total = sum((s.total or 0) for s in sales if s.payment_method == 'fiado')
+
+        payment_breakdown = {
+            'efectivo': {'amount': cash_total, 'pct': round((cash_total / total_sales * 100), 1) if total_sales > 0 else 0},
+            'transferencia': {'amount': transfer_total, 'pct': round((transfer_total / total_sales * 100), 1) if total_sales > 0 else 0},
+            'tarjeta': {'amount': card_total, 'pct': round((card_total / total_sales * 100), 1) if total_sales > 0 else 0},
+            'fiado': {'amount': credit_total, 'pct': round((credit_total / total_sales * 100), 1) if total_sales > 0 else 0},
         }
-        for p in top_products_query
-    ]
 
-    # 7. Inventario y Alertas de Reposición (Semáforo de Stock)
-    active_products = Product.query.filter_by(store_id=store_id, is_active=True).all()
-    total_active_products = len(active_products)
-    inventory_valuation = sum(
-        (p.stock or 0) * p.price for p in active_products if not p.sell_by_weight and p.stock and p.stock > 0
-    )
+        # 5. Serie temporal para gráfica de tendencia (últimos días)
+        trend_data = []
+        days_back = 7 if period in ('today', 'week') else 14
+        day_names_es = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom']
+        for i in range(days_back - 1, -1, -1):
+            day_date = (now - timedelta(days=i)).date()
+            d_start = datetime.combine(day_date, datetime.min.time())
+            d_end = datetime.combine(day_date, datetime.max.time().replace(microsecond=0))
+            d_sales = Sale.query.filter(
+                Sale.store_id == store_id,
+                Sale.sale_date >= d_start,
+                Sale.sale_date <= d_end,
+                Sale.status == 'completada'
+            ).all()
+            trend_data.append({
+                'date_str': day_date.strftime('%d/%m'),
+                'day_name': day_names_es[day_date.weekday()],
+                'total': sum((s.total or 0) for s in d_sales),
+                'count': len(d_sales)
+            })
 
-    out_of_stock = [
-        p for p in active_products
-        if not p.sell_by_weight and p.stock is not None and p.stock <= 0
-    ][:6]
+        # 6. Top 5 Productos estrella (más vendidos en el periodo)
+        top_products = []
+        try:
+            qty_sold_col = func.sum(SaleItem.quantity).label('qty_sold')
+            rev_col = func.sum(SaleItem.subtotal).label('revenue')
+            top_products_query = db.session.query(
+                Product.id,
+                Product.name,
+                Category.name.label('cat_name'),
+                Product.price,
+                Product.stock,
+                qty_sold_col,
+                rev_col
+            ).join(SaleItem, SaleItem.product_id == Product.id)\
+             .join(Sale, Sale.id == SaleItem.sale_id)\
+             .outerjoin(Category, Category.id == Product.category_id)\
+             .filter(
+                 Product.store_id == store_id,
+                 Sale.sale_date >= start_date,
+                 Sale.sale_date <= end_date,
+                 Sale.status == 'completada'
+             ).group_by(Product.id, Product.name, Category.name, Product.price, Product.stock)\
+             .order_by(desc(qty_sold_col))\
+             .limit(5).all()
 
-    low_stock = [
-        p for p in active_products
-        if not p.sell_by_weight and p.stock is not None and 0 < p.stock <= 5
-    ][:6]
+            top_products = [
+                {
+                    'id': p.id,
+                    'name': p.name,
+                    'category': p.cat_name or 'General',
+                    'price': p.price or 0,
+                    'stock': p.stock if p.stock is not None else 'N/A',
+                    'qty_sold': int(p.qty_sold or 0),
+                    'revenue': int(p.revenue or 0)
+                }
+                for p in top_products_query
+            ]
+        except Exception as e:
+            logger.warning(f"Error cargando top_products en dashboard: {e}")
+            top_products = []
 
-    # 8. Estado de Cartera y Fiados
-    credit_clients = CreditClient.query.filter_by(store_id=store_id, is_active=True).all()
-    total_debt = sum(c.total_debt for c in credit_clients)
-    debtors_count = len([c for c in credit_clients if c.total_debt > 0])
-    top_debtors = sorted([c for c in credit_clients if c.total_debt > 0], key=lambda c: c.total_debt, reverse=True)[:5]
+        # 7. Inventario y Alertas de Reposición (Semáforo de Stock)
+        active_products = Product.query.filter_by(store_id=store_id, is_active=True).all()
+        total_active_products = len(active_products)
+        inventory_valuation = sum(
+            (p.stock or 0) * (p.price or 0)
+            for p in active_products
+            if not getattr(p, 'sell_by_weight', False) and p.stock is not None and p.stock > 0
+        )
 
-    return render_template(
-        'dashboard.html',
-        period=period,
-        period_label=period_label,
-        prev_label=prev_label,
-        total_sales=total_sales,
-        sales_count=sales_count,
-        avg_ticket=avg_ticket,
-        growth_pct=growth_pct,
-        prev_total=prev_total,
-        payment_breakdown=payment_breakdown,
-        trend_data=trend_data,
-        top_products=top_products,
-        total_active_products=total_active_products,
-        inventory_valuation=inventory_valuation,
-        out_of_stock=out_of_stock,
-        low_stock=low_stock,
-        total_debt=total_debt,
-        debtors_count=debtors_count,
-        total_clients=len(credit_clients),
-        top_debtors=top_debtors
-    )
+        out_of_stock = [
+            p for p in active_products
+            if not getattr(p, 'sell_by_weight', False) and p.stock is not None and p.stock <= 0
+        ][:6]
+
+        low_stock = [
+            p for p in active_products
+            if not getattr(p, 'sell_by_weight', False) and p.stock is not None and 0 < p.stock <= 5
+        ][:6]
+
+        # 8. Estado de Cartera y Fiados
+        credit_clients = CreditClient.query.filter_by(store_id=store_id, is_active=True).all()
+        total_debt = sum((c.total_debt or 0) for c in credit_clients)
+        debtors_count = len([c for c in credit_clients if (c.total_debt or 0) > 0])
+        top_debtors = sorted([c for c in credit_clients if (c.total_debt or 0) > 0], key=lambda c: (c.total_debt or 0), reverse=True)[:5]
+
+        return render_template(
+            'dashboard.html',
+            period=period,
+            period_label=period_label,
+            prev_label=prev_label,
+            total_sales=total_sales,
+            sales_count=sales_count,
+            avg_ticket=avg_ticket,
+            growth_pct=growth_pct,
+            prev_total=prev_total,
+            payment_breakdown=payment_breakdown,
+            trend_data=trend_data,
+            top_products=top_products,
+            total_active_products=total_active_products,
+            inventory_valuation=inventory_valuation,
+            out_of_stock=out_of_stock,
+            low_stock=low_stock,
+            total_debt=total_debt,
+            debtors_count=debtors_count,
+            total_clients=len(credit_clients),
+            top_debtors=top_debtors
+        )
+    except Exception as e:
+        logger.error(f"Error crítico en dashboard: {e}", exc_info=True)
+        flash(f'Ocurrió un error al cargar el dashboard: {e}', 'error')
+        return redirect(url_for('settings'))
 
 @app.route('/settings/store', methods=['GET', 'POST'])
 @login_required
