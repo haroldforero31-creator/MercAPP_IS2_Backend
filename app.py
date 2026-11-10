@@ -43,7 +43,9 @@ if getattr(sys, 'frozen', False):
 else:
     base_dir = os.path.abspath(os.path.dirname(__file__))
     sibling_frontend = os.path.abspath(os.path.join(base_dir, '..', 'MercAPP_IS2_Frontend'))
-    if os.path.exists(sibling_frontend):
+    if os.path.exists(os.path.join(base_dir, 'templates')):
+        frontend_dir = base_dir
+    elif os.path.exists(sibling_frontend):
         frontend_dir = sibling_frontend
     elif os.path.exists(os.path.join(base_dir, 'MercAPP_IS2_Frontend')):
         frontend_dir = os.path.abspath(os.path.join(base_dir, 'MercAPP_IS2_Frontend'))
@@ -529,7 +531,7 @@ def send_verification_email(email, code):
         msg.html = f"""
         <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 30px; background: #1A1F2E; color: #E8EAED; border-radius: 16px;">
             <div style="text-align: center; margin-bottom: 24px;">
-                <img src="https://mercapp-deploy.onrender.com/static/images/logo_mercapp.png" alt="MercAPP Logo" width="56" height="56" style="margin-bottom: 8px; border-radius: 8px;" onerror="this.style.display='none'">
+                <img src="https://mercapp-deploy.onrender.com/static/images/mercapp_brand_logo.png" alt="MercAPP Logo" width="56" height="56" style="margin-bottom: 8px; border-radius: 8px;" onerror="this.style.display='none'">
                 <h1 style="font-size: 1.8rem; margin: 8px 0 4px; background: linear-gradient(135deg, #2E7D32, #FFA726); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">MercAPP</h1>
                 <p style="color: #9AA0A6; font-size: 0.9rem;">Sistema de Supermercado</p>
             </div>
@@ -586,7 +588,7 @@ def send_reset_email(user, token):
         msg.html = f"""
         <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 30px; background: #1A1F2E; color: #E8EAED; border-radius: 16px;">
             <div style="text-align: center; margin-bottom: 24px;">
-                <img src="https://mercapp-deploy.onrender.com/static/images/logo_mercapp.png" alt="MercAPP Logo" width="56" height="56" style="margin-bottom: 8px; border-radius: 8px;" onerror="this.style.display='none'">
+                <img src="https://mercapp-deploy.onrender.com/static/images/mercapp_brand_logo.png" alt="MercAPP Logo" width="56" height="56" style="margin-bottom: 8px; border-radius: 8px;" onerror="this.style.display='none'">
                 <h1 style="font-size: 1.8rem; margin: 8px 0 4px; color: #FFA726;">MercAPP</h1>
                 <p style="color: #9AA0A6; font-size: 0.9rem;">Recuperación de Contraseña</p>
             </div>
@@ -661,7 +663,7 @@ def send_credit_sale_invoice(client, sale, sale_items):
         msg.html = f"""
         <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #121622; color: #E8EAED; border-radius: 16px; overflow: hidden; border: 1px solid #2D3344; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
             <div style="background: linear-gradient(135deg, #1b5e20, #2E7D32); padding: 24px; text-align: center;">
-                <img src="https://mercapp-deploy.onrender.com/static/images/logo_mercapp.png" alt="Logo" width="48" height="48" style="margin-bottom: 8px; border-radius: 8px;" onerror="this.style.display='none'"><br>
+                <img src="https://mercapp-deploy.onrender.com/static/images/mercapp_brand_logo.png" alt="Logo" width="48" height="48" style="margin-bottom: 8px; border-radius: 8px;" onerror="this.style.display='none'"><br>
                 <h1 style="margin: 0; font-size: 1.6rem; color: #FFFFFF; letter-spacing: 0.5px;">{store_name}</h1>
                 <p style="margin: 4px 0 0; color: rgba(255,255,255,0.85); font-size: 0.9rem;">Comprobante Oficial de Compra a Crédito (Fiado)</p>
             </div>
@@ -758,7 +760,7 @@ def send_credit_payment_receipt(client, payment, previous_debt):
         msg.html = f"""
         <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #121622; color: #E8EAED; border-radius: 16px; overflow: hidden; border: 1px solid #2D3344; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
             <div style="background: linear-gradient(135deg, #0D47A1, #1976D2); padding: 24px; text-align: center;">
-                <img src="https://mercapp-deploy.onrender.com/static/images/logo_mercapp.png" alt="Logo" width="48" height="48" style="margin-bottom: 8px; border-radius: 8px;" onerror="this.style.display='none'"><br>
+                <img src="https://mercapp-deploy.onrender.com/static/images/mercapp_brand_logo.png" alt="Logo" width="48" height="48" style="margin-bottom: 8px; border-radius: 8px;" onerror="this.style.display='none'"><br>
                 <h1 style="margin: 0; font-size: 1.6rem; color: #FFFFFF; letter-spacing: 0.5px;">{store_name}</h1>
                 <p style="margin: 4px 0 0; color: rgba(255,255,255,0.85); font-size: 0.9rem;">Recibo Oficial de Abono a Deuda</p>
             </div>
@@ -2717,14 +2719,14 @@ def license():
 
     if request.method == 'POST':
         password = request.form.get('password')
-        master_pwd = os.getenv('LICENSE_MASTER_KEY', 'MercAPP-Master-Key-2026')
-        if password == master_pwd:
+        master_pwd = os.getenv('LICENSE_MASTER_KEY')
+        if master_pwd and password == master_pwd:
             license_record.expiration_date = datetime.now() + timedelta(days=60)
             db.session.commit()
             flash('Licencia activada por 60 días más.', 'success')
             return redirect(url_for('pos'))
         else:
-            flash('Contraseña de desbloqueo incorrecta.', 'error')
+            flash('Contraseña de desbloqueo incorrecta o no configurada en el servidor.', 'error')
             
     return render_template('licencia.html')
 
@@ -2733,8 +2735,8 @@ def license():
 @login_required
 def api_renovar_licencia():
     password = request.form.get('password')
-    master_pwd = os.getenv('LICENSE_MASTER_KEY', 'MercAPP-Master-Key-2026')
-    if password == master_pwd:
+    master_pwd = os.getenv('LICENSE_MASTER_KEY')
+    if master_pwd and password == master_pwd:
         license_record = AppLicense.query.first()
         if not license_record:
             license_record = AppLicense(expiration_date=datetime.now() + timedelta(days=60), last_time_checked=datetime.now())
@@ -2744,7 +2746,7 @@ def api_renovar_licencia():
         db.session.commit()
         flash('Licencia renovada exitosamente por 60 días más desde hoy.', 'success')
     else:
-        flash('Contraseña de renovación incorrecta.', 'error')
+        flash('Contraseña de renovación incorrecta o no configurada en el servidor.', 'error')
     
     return redirect(url_for('settings'))
 
@@ -6285,6 +6287,53 @@ def api_report_inventory_excel():
     filename = f"MercAPP_Inventario_{store_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+
+# ============================================================
+# RUTINAS DE BASE DE DATOS (STORED PROCEDURES & TRIGGERS — CRITERIO H)
+# ============================================================
+from services.database_routines_service import DatabaseRoutinesService
+
+@app.route('/api/routines/sp-reporte-ventas-diarias', methods=['GET'])
+@login_required
+def api_routine_reporte_ventas():
+    store_id = current_user.store_id if hasattr(current_user, 'store_id') else 1
+    report = DatabaseRoutinesService.sp_reporte_ventas_diarias(store_id)
+    return jsonify({'success': True, 'routine': 'sp_reporte_ventas_diarias', 'data': report})
+
+@app.route('/api/routines/sp-reorden-stock', methods=['GET'])
+@login_required
+def api_routine_reorden_stock():
+    store_id = current_user.store_id if hasattr(current_user, 'store_id') else 1
+    umbral = request.args.get('umbral', default=5, type=int)
+    items = DatabaseRoutinesService.sp_reorden_stock_minimo(store_id, umbral=umbral)
+    return jsonify({'success': True, 'routine': 'sp_reorden_stock_minimo', 'data': items})
+
+@app.route('/api/routines/sp-abonar-deuda', methods=['POST'])
+@login_required
+def api_routine_abonar_deuda():
+    data = request.get_json() or {}
+    client_id = data.get('client_id')
+    amount = data.get('amount', 0)
+    payment_method = data.get('payment_method', 'efectivo')
+    notes = data.get('notes', '')
+    try:
+        pago = DatabaseRoutinesService.sp_abonar_deuda_cliente(client_id, amount, payment_method, notes)
+        return jsonify({'success': True, 'routine': 'sp_abonar_deuda_cliente', 'payment_id': pago.id, 'amount': pago.amount})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+
+@app.route('/api/routines/sp-cerrar-turno-caja', methods=['POST'])
+@login_required
+def api_routine_cerrar_caja():
+    data = request.get_json() or {}
+    session_id = data.get('session_id')
+    actual_cash = data.get('actual_cash', 0)
+    try:
+        ses = DatabaseRoutinesService.sp_cerrar_turno_caja(session_id, actual_cash)
+        return jsonify({'success': True, 'routine': 'sp_cerrar_turno_caja', 'session_id': ses.id, 'status': ses.status})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
 
 
 if __name__ == '__main__':

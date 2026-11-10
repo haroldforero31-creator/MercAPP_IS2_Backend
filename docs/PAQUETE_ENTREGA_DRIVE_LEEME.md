@@ -81,3 +81,4 @@
   - Tokens CSRF integrados para formularios web de sesión.
   - Encabezados HTTP de seguridad: `Content-Security-Policy`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy: strict-origin-when-cross-origin`.
   - Bloqueo temporal de cuentas por fuerza bruta: 5 intentos fallidos suspenden la cuenta por 15 minutos exactos (`locked_until`).
+

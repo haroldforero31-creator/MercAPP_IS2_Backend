@@ -392,3 +392,122 @@ def test_rate_limiter_in_memory():
         assert is_limited is True
         assert retry > 0
 
+
+def test_helpers_complete_coverage():
+    from utilities.helpers import round_to_50, format_weight, generate_verification_code, validate_payment
+
+    # round_to_50
+    assert round_to_50(120) == 100
+    assert round_to_50(130) == 150
+
+    # format_weight
+    assert 'kg' in format_weight(1500, 'kg')
+    assert 'lb' in format_weight(1000, 'lb')
+    assert '0 kg' in format_weight(None, 'kg')
+    assert '0 lb' in format_weight(None, 'lb')
+    assert format_weight("invalido", 'kg') == "invalido"
+
+    # verification code
+    code = generate_verification_code()
+    assert len(code) == 6
+    assert code.isdigit()
+
+    # validate_payment: efectivo
+    err, d = validate_payment('efectivo', 10000, amount_received=None)
+    assert len(err) > 0
+    err, d = validate_payment('efectivo', 10000, amount_received="10.000")
+    assert len(err) > 0
+    err, d = validate_payment('efectivo', 10000, amount_received="abc")
+    assert len(err) > 0
+    err, d = validate_payment('efectivo', 10000, amount_received="5000")
+    assert len(err) > 0
+    err, d = validate_payment('efectivo', 10000, amount_received="15000000")
+    assert len(err) > 0
+    err, d = validate_payment('efectivo', 10000, amount_received="12000")
+    assert len(err) == 0
+    assert d['change_given'] == 2000
+
+    # validate_payment: tarjeta
+    err, d = validate_payment('tarjeta', 20000, card_last4="1234", card_approval="998877")
+    assert len(err) == 0
+    assert "1234" in d['payment_ref']
+
+    # validate_payment: transferencia
+    err, d = validate_payment('transferencia', 30000, transfer_bank="Bancolombia", transfer_ref="TRX-12345", transfer_name="Carlos")
+    assert len(err) == 0
+    assert "Bancolombia" in d['payment_ref']
+
+    # validate_payment: mixto
+    err, d = validate_payment('mixto', 50000, amount_cash=20000, amount_card=20000, amount_transfer=10000)
+    assert len(err) == 0
+    assert d['amount_received'] == 50000
+
+    err, d = validate_payment('mixto', 50000, amount_cash=10000, amount_card=10000, amount_transfer=10000)
+    assert len(err) > 0
+
+
+def test_database_routines_service_edge_cases(test_app_ctx):
+    from services.database_routines_service import DatabaseRoutinesService
+    from models import Product, User, CashSession, CreditClient, CreditSale
+
+    store = test_app_ctx["store"]
+    cat = test_app_ctx["category"]
+
+    prod = Product(
+        store_id=store.id,
+        category_id=cat.id,
+        name="Producto Test SP Edge",
+        barcode="SPEDGE1234",
+        price=3000,
+        stock=5
+    )
+    db.session.add(prod)
+
+    user = User.query.filter_by(store_id=store.id).first()
+    if not user:
+        user = User(store_id=store.id, name="User Edge", email="edge@test.com", password_hash="hash")
+        db.session.add(user)
+
+    sess = CashSession(store_id=store.id, user_id=user.id, base_amount=10000, status='abierta')
+    db.session.add(sess)
+    db.session.commit()
+
+    # SP1 Insufficient stock
+    with pytest.raises(ValueError, match="Stock insuficiente"):
+        DatabaseRoutinesService.sp_registrar_venta_pos(
+            store_id=store.id, user_id=user.id, cash_session_id=sess.id,
+            receipt_number="REC-FAIL", product_id=prod.id, quantity=100,
+            unit_price=3000, payment_method="efectivo", amount_received=300000
+        )
+
+    # SP1 Product not in store
+    with pytest.raises(ValueError, match="no encontrado"):
+        DatabaseRoutinesService.sp_registrar_venta_pos(
+            store_id=999999, user_id=user.id, cash_session_id=sess.id,
+            receipt_number="REC-FAIL", product_id=prod.id, quantity=1,
+            unit_price=3000, payment_method="efectivo", amount_received=3000
+        )
+
+    # SP2 Session already closed
+    sess.status = 'cerrada'
+    db.session.commit()
+    with pytest.raises(ValueError, match="no encontrada o ya está cerrada"):
+        DatabaseRoutinesService.sp_cerrar_turno_caja(sess.id, actual_cash=10000)
+
+    # SP4 Client with no debt
+    client = CreditClient(store_id=store.id, name="Cliente Sin Deuda", phone="3000000000", email="nodebt@test.com")
+    db.session.add(client)
+    db.session.commit()
+    with pytest.raises(ValueError, match="no tiene deuda pendiente"):
+        DatabaseRoutinesService.sp_abonar_deuda_cliente(client.id, amount=1000)
+
+    # SP4 Client with debt paid in full (balance reaches 0)
+    cs = CreditSale(client_id=client.id, sale_id=1, amount=4000, balance=4000, status='pendiente')
+    db.session.add(cs)
+    db.session.commit()
+    pago = DatabaseRoutinesService.sp_abonar_deuda_cliente(client.id, amount=6000)
+    assert pago.amount == 4000
+    assert cs.balance == 0
+    assert cs.status == 'pagado'
+
+

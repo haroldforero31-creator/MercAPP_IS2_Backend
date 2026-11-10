@@ -566,3 +566,4 @@ erDiagram
     pedido ||--o{ notificacion_pedido : "notifica"
     pedido ||--o| venta : "convierte a"
 ```
+
