@@ -4312,6 +4312,93 @@ def session_detail(session_id):
                            card_total=card_total, expected_cash_live=expected_cash)
 
 
+@app.route('/session/<int:session_id>/closing-report', endpoint='session_closing_report')
+@login_required
+@admin_only
+def session_closing_report(session_id):
+    """Permite visualizar e imprimir el reporte ejecutivo HTML de cierre de caja en el navegador."""
+    session_obj = db.session.get(CashSession, session_id)
+    if not session_obj or session_obj.store_id != current_user.store_id:
+        flash('Sesión de caja no encontrada.', 'error')
+        return redirect(url_for('session_history'))
+
+    # Si ya existe el reporte HTML en la cola de correo, mostrarlo directamente
+    queue_item = EmailQueue.query.filter_by(
+        store_id=current_user.store_id,
+        email_type='cierre_caja'
+    ).order_by(EmailQueue.created_at.desc()).first()
+    if queue_item and queue_item.html_body:
+        return render_template_string("""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <title>MercAPP — Reporte de Cierre de Caja</title>
+            <style>
+                body { margin: 0; padding: 20px; background: #07090e; color: #fff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+                .action-bar { max-width: 650px; margin: 0 auto 16px; display: flex; justify-content: space-between; align-items: center; }
+                .btn { padding: 8px 16px; border-radius: 6px; font-weight: 600; text-decoration: none; cursor: pointer; border: none; }
+                .btn-back { background: #1f2937; color: #e5e7eb; }
+                .btn-print { background: #f59e0b; color: #000; }
+                @media print { .action-bar { display: none !important; } }
+            </style>
+        </head>
+        <body>
+            <div class="action-bar">
+                <a href="{{ url_for('session_history') }}" class="btn btn-back">← Volver a Historial</a>
+                <button onclick="window.print()" class="btn btn-print">🖨️ Imprimir / Guardar PDF</button>
+            </div>
+            {{ body|safe }}
+        </body>
+        </html>
+        """, body=queue_item.html_body)
+
+    store = db.session.get(Store, session_obj.store_id)
+    sales = Sale.query.filter_by(cash_session_id=session_id, status='completada').all()
+    total_sales = sum(s.total for s in sales)
+    stats = {
+        'cajero_name': current_user.name,
+        'opened_at_str': session_obj.opened_at.strftime('%d/%m/%Y %I:%M %p') if session_obj.opened_at else 'N/A',
+        'closed_at_str': session_obj.closed_at.strftime('%d/%m/%Y %I:%M %p') if session_obj.closed_at else datetime.now().strftime('%d/%m/%Y %I:%M %p'),
+        'total_sales': total_sales,
+        'total_tickets': len(sales),
+        'avg_ticket': int(total_sales / len(sales)) if sales else 0,
+        'opening_base': session_obj.base_amount or 0,
+        'cash_sales': session_obj.cash_sales or 0,
+        'card_sales': session_obj.card_sales or 0,
+        'transfer_sales': session_obj.transfer_sales or 0,
+        'credit_sales': sum(s.total for s in sales if s.payment_method == 'fiado'),
+        'expected_cash': session_obj.expected_cash or 0,
+        'actual_cash': session_obj.actual_cash or 0,
+        'diff': (session_obj.actual_cash or 0) - (session_obj.expected_cash or 0)
+    }
+    raw_html = generate_closing_report_html(session_obj, store, current_user, stats)
+    return render_template_string("""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>MercAPP — Reporte de Cierre de Caja</title>
+        <style>
+            body { margin: 0; padding: 20px; background: #07090e; color: #fff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+            .action-bar { max-width: 650px; margin: 0 auto 16px; display: flex; justify-content: space-between; align-items: center; }
+            .btn { padding: 8px 16px; border-radius: 6px; font-weight: 600; text-decoration: none; cursor: pointer; border: none; }
+            .btn-back { background: #1f2937; color: #e5e7eb; }
+            .btn-print { background: #f59e0b; color: #000; }
+            @media print { .action-bar { display: none !important; } }
+        </style>
+    </head>
+    <body>
+        <div class="action-bar">
+            <a href="{{ url_for('session_history') }}" class="btn btn-back">← Volver a Historial</a>
+            <button onclick="window.print()" class="btn btn-print">🖨️ Imprimir / Guardar PDF</button>
+        </div>
+        {{ body|safe }}
+    </body>
+    </html>
+    """, body=raw_html)
+
+
 # ============================================================
 # ROUTES — HISTORIAL DE VENTAS Y FACTURACIÓN
 # ============================================================
