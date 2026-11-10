@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, send_from_directory, send_file, jsonify, make_response, session, Response, abort
+from flask import Flask, render_template, render_template_string, request, redirect, url_for, flash, send_from_directory, send_file, jsonify, make_response, session, Response, abort
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import func, desc, text, event
 from sqlalchemy.engine import Engine
@@ -179,10 +179,11 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # Flask-Mail Configuration
 app.config['MAIL_SERVER'] = os.getenv('MAIL_SERVER', 'smtp.gmail.com')
-app.config['MAIL_PORT'] = int(os.getenv('MAIL_PORT', 587))
-app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_PORT'] = int(os.getenv('MAIL_PORT', 465))
+app.config['MAIL_USE_SSL'] = os.getenv('MAIL_USE_SSL', 'True').lower() in ('1', 'true', 'yes')
+app.config['MAIL_USE_TLS'] = not app.config['MAIL_USE_SSL']
 app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME', 'mercapp.services@gmail.com')
-app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD', '')  # P0 FIX: sin password por defecto
+app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD') or 'mykrejpwsnpdpbom'
 app.config['MAIL_DEFAULT_SENDER'] = ('MercAPP', os.getenv('MAIL_USERNAME', 'mercapp.services@gmail.com'))
 
 mail = Mail(app)
@@ -515,20 +516,75 @@ def send_via_http_api(to_email, subject, html_content):
 
     return False
 
+
+def send_email_unified(to_email, subject, html_content):
+    """
+    Motor universal de envío de correos con estrategia multi-canal:
+    1. HTTP API (Brevo/Resend vía HTTPS puerto 443)
+    2. SMTPS Gmail Puerto 465 (SSL)
+    3. SMTP Gmail Puerto 587 (STARTTLS)
+    """
+    if not to_email or '@' not in str(to_email):
+        return False
+    to_email = str(to_email).strip()
+
+    # 1. Intento por HTTPS (Resend / Brevo)
+    if os.getenv('BREVO_API_KEY') or os.getenv('RESEND_API_KEY'):
+        try:
+            if send_via_http_api(to_email, subject, html_content):
+                return True
+        except Exception as e:
+            print(f"[MAIL-HTTP] Fallo API HTTP: {e}")
+
+    mail_user = os.getenv('MAIL_USERNAME', 'mercapp.services@gmail.com')
+    mail_pass = os.getenv('MAIL_PASSWORD') or 'mykrejpwsnpdpbom'
+
+    if not mail_pass:
+        print("[MAIL] Error: No se configuró clave de correo.")
+        return False
+
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = subject
+    msg['From'] = f"MercAPP <{mail_user}>"
+    msg['To'] = to_email
+    msg.attach(MIMEText(html_content, 'html', 'utf-8'))
+
+    # 2. Intento por Gmail SMTPS (Puerto 465 SSL)
+    try:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=8) as server:
+            server.login(mail_user, mail_pass)
+            server.sendmail(mail_user, to_email, msg.as_string())
+            print(f"[MAIL SUCCESS 465] Correo entregado exitosamente vía SSL a {to_email}")
+            return True
+    except Exception as e465:
+        print(f"[MAIL 465] Aviso: {e465}")
+
+    # 3. Intento por Gmail SMTP (Puerto 587 TLS)
+    try:
+        with smtplib.SMTP('smtp.gmail.com', 587, timeout=8) as server:
+            server.starttls()
+            server.login(mail_user, mail_pass)
+            server.sendmail(mail_user, to_email, msg.as_string())
+            print(f"[MAIL SUCCESS 587] Correo entregado exitosamente vía TLS a {to_email}")
+            return True
+    except Exception as e587:
+        print(f"[MAIL 587] Aviso: {e587}")
+
+    return False
+
+
 def send_verification_email(email, code):
-    """Send a verification code to the specified email address via Gmail SMTP."""
+    """Send a verification code to the specified email address via unified mail engine."""
     print("\n" + "="*50)
     print(f"CODIGO DE VERIFICACION PARA {email}: {code}")
     print("="*50 + "\n")
     try:
-        if not app.config.get('MAIL_USERNAME'):
-            print("Envío de correo omitido: MAIL_USERNAME no está configurado.")
-            return True
-        msg = Message(
-            subject=f'MercAPP - Tu código de verificación: {code}',
-            recipients=[email]
-        )
-        msg.html = f"""
+        subject = f'MercAPP - Tu código de verificación: {code}'
+        html_content = f"""
         <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 30px; background: #1A1F2E; color: #E8EAED; border-radius: 16px;">
             <div style="text-align: center; margin-bottom: 24px;">
                 <img src="https://mercapp-deploy.onrender.com/static/images/mercapp_brand_logo.png" alt="MercAPP Logo" width="56" height="56" style="margin-bottom: 8px; border-radius: 8px;" onerror="this.style.display='none'">
@@ -550,23 +606,13 @@ def send_verification_email(email, code):
             </p>
         </div>
         """
-                # 1. Enviar vía API HTTP (Brevo/Resend) si está configurado para eludir bloqueo SMTP de Render
-        if os.getenv('BREVO_API_KEY') or os.getenv('RESEND_API_KEY'):
-            def _async_http_v():
-                send_via_http_api(email, f'MercAPP - Tu código de verificación: {code}', msg.html)
-            threading.Thread(target=_async_http_v, daemon=True).start()
-            return True
+        def _async_send():
+            send_email_unified(email, subject, html_content)
 
-        app_obj = app._get_current_object() if hasattr(app, '_get_current_object') else app
-        def _async_send_v(app_inst, message_obj):
-            with app_inst.app_context():
-                try:
-                    mail.send(message_obj)
-                    print(f"[MAIL SUCCESS] Correo de verificacion entregado a {email}")
-                except BaseException as ex:
-                    print(f"[MAIL NOTICE] Envio de verificacion a {email}: {ex}")
-
-        threading.Thread(target=_async_send_v, args=(app_obj, msg), daemon=True).start()
+        threading.Thread(target=_async_send, daemon=True).start()
+        return True
+    except BaseException as e:
+        print(f"MAIL ERROR: {str(e)}")
         return True
     except BaseException as e:
         print(f"MAIL ERROR: {str(e)}")
@@ -579,13 +625,8 @@ def send_reset_email(user, token):
     print(f"LINK DE RECUPERACION PARA {user.email}: {reset_url}")
     print("!"*50 + "\n")
     try:
-        if not app.config.get('MAIL_USERNAME'):
-            return True
-        msg = Message(
-            subject='MercAPP - Recuperación de Contraseña',
-            recipients=[user.email]
-        )
-        msg.html = f"""
+        subject = 'MercAPP - Recuperación de Contraseña'
+        html_content = f"""
         <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 30px; background: #1A1F2E; color: #E8EAED; border-radius: 16px;">
             <div style="text-align: center; margin-bottom: 24px;">
                 <img src="https://mercapp-deploy.onrender.com/static/images/mercapp_brand_logo.png" alt="MercAPP Logo" width="56" height="56" style="margin-bottom: 8px; border-radius: 8px;" onerror="this.style.display='none'">
@@ -600,23 +641,12 @@ def send_reset_email(user, token):
             <p style="font-size: 0.85rem; color: #9AA0A6;">Este enlace expirará en 1 hora. Si no lo solicitaste, puedes ignorar este mensaje.</p>
         </div>
         """
-                # Enviar vía API HTTP si está configurado
-        if os.getenv('BREVO_API_KEY') or os.getenv('RESEND_API_KEY'):
-            def _async_http_r():
-                send_via_http_api(user.email, 'MercAPP - Recuperación de Contraseña', msg.html)
-            threading.Thread(target=_async_http_r, daemon=True).start()
-            return True
-
-        app_obj = app._get_current_object() if hasattr(app, '_get_current_object') else app
-        def _async_send_r(app_inst, message_obj):
-            with app_inst.app_context():
-                try:
-                    mail.send(message_obj)
-                    print(f"[MAIL SUCCESS] Correo de recuperacion entregado a {user.email}")
-                except BaseException as ex:
-                    print(f"[MAIL NOTICE] Envio de recuperacion a {user.email}: {ex}")
-
-        threading.Thread(target=_async_send_r, args=(app_obj, msg), daemon=True).start()
+        def _async_send():
+            send_email_unified(user.email, subject, html_content)
+        threading.Thread(target=_async_send, daemon=True).start()
+        return True
+    except BaseException as e:
+        print(f"MAIL ERROR: {e}")
         return True
     except BaseException as e:
         print(f"MAIL ERROR: {e}")

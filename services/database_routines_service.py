@@ -145,12 +145,13 @@ class DatabaseRoutinesService:
         for cs in pending_credits:
             if remaining <= 0:
                 break
-            if cs.balance <= remaining:
-                remaining -= cs.balance
+            bal = cs.balance or 0
+            if bal <= remaining:
+                remaining -= bal
                 cs.balance = 0
                 cs.status = 'pagado'
             else:
-                cs.balance -= remaining
+                cs.balance = bal - remaining
                 remaining = 0
 
         db.session.commit()
