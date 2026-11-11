@@ -1,0 +1,399 @@
+{
+  "info": {
+    "name": "MercAPP — API REST Collection",
+    "description": "Colección completa de la API REST de MercAPP para sustentación. Incluye autenticación JWT, CRUD de usuarios, productos, ventas, reportes y Merki IA.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://mercapp-deploy.onrender.com"
+    },
+    {
+      "key": "jwt_token",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "🔐 Autenticación",
+      "item": [
+        {
+          "name": "Obtener JWT Token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"admin@mercapp.com\",\n  \"password\": \"tu_password\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/token",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "token"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if(jsonData.token) { pm.collectionVariables.set('jwt_token', jsonData.token); }",
+                  "pm.test('Status 200', function() { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "👤 Usuarios",
+      "item": [
+        {
+          "name": "GET Listar Usuarios",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/users",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "users"
+              ]
+            }
+          }
+        },
+        {
+          "name": "POST Crear Usuario",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Cajero Nuevo\",\n  \"email\": \"cajero@mercapp.com\",\n  \"password\": \"Clave123!\",\n  \"is_admin\": false\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/users",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "users"
+              ]
+            }
+          }
+        },
+        {
+          "name": "PUT Actualizar Usuario",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Nombre Actualizado\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/users/1",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "users",
+                "1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "DELETE Eliminar Usuario",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/users/2",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "users",
+                "2"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "📦 Productos",
+      "item": [
+        {
+          "name": "GET Listar Productos",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/products?store_id=1",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "products"
+              ],
+              "query": [
+                {
+                  "key": "store_id",
+                  "value": "1"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "POST Crear Producto",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Arroz Diana 500g\",\n  \"price\": 3500,\n  \"category_id\": 1,\n  \"stock\": 50,\n  \"barcode\": \"7702001234567\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/products",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "products"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "🧾 Ventas",
+      "item": [
+        {
+          "name": "GET Historial de Ventas",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/sales",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "sales"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "📊 Reportes",
+      "item": [
+        {
+          "name": "GET Reporte de Ventas Excel",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/reports/sales?from=2026-01-01&to=2026-12-31",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "reports",
+                "sales"
+              ],
+              "query": [
+                {
+                  "key": "from",
+                  "value": "2026-01-01"
+                },
+                {
+                  "key": "to",
+                  "value": "2026-12-31"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET Reporte de Inventario Excel",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/reports/inventory",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "reports",
+                "inventory"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "🤖 Merki IA",
+      "item": [
+        {
+          "name": "POST Consultar Merki",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": \"\\u00bfCu\\u00e1nto vend\\u00ed hoy?\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/merki/ask",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "merki",
+                "ask"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "❤️ Salud del Sistema",
+      "item": [
+        {
+          "name": "GET Health Check",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "health"
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET Sync Status",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/sync/status",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "sync",
+                "status"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
