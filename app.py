@@ -11,6 +11,7 @@ import jwt as pyjwt
 from utilities.rate_limiter import limiter
 
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import safe_join
 from functools import wraps
 from PIL import Image
 from datetime import datetime, timedelta
@@ -4121,19 +4122,23 @@ def audit():
 
 @app.route('/user_images/<path:filename>')
 def user_images(filename):
-    """Servir imágenes subidas o por defecto con fallback."""
-    # 1. Probar en uploads
-    upload_path = os.path.join(UPLOAD_DIR, filename)
-    if os.path.exists(upload_path):
-        return send_from_directory(UPLOAD_DIR, filename)
-    
-    # 2. Probar en static/images
-    static_img_path = os.path.join(STATIC_IMG_DIR, filename)
-    if os.path.exists(static_img_path):
-        return send_from_directory(STATIC_IMG_DIR, filename)
-        
-    # 3. Fallback en raíz de uploads
-    return send_from_directory(UPLOAD_DIR, filename)
+    """Servir imágenes subidas o de catálogo con sanitización estricta contra Path Traversal y Filesystem Oracle."""
+    # 1. Probar en UPLOAD_DIR usando safe_join para prevenir Filesystem Oracle / Directory Traversal
+    safe_upload = safe_join(UPLOAD_DIR, filename)
+    if safe_upload and os.path.isfile(safe_upload):
+        rel_dir = os.path.dirname(safe_upload)
+        file_name = os.path.basename(safe_upload)
+        return send_from_directory(rel_dir, file_name)
+
+    # 2. Probar en STATIC_IMG_DIR con resolución segura
+    safe_static = safe_join(STATIC_IMG_DIR, filename)
+    if safe_static and os.path.isfile(safe_static):
+        rel_dir = os.path.dirname(safe_static)
+        file_name = os.path.basename(safe_static)
+        return send_from_directory(rel_dir, file_name)
+
+    # 3. Fallback seguro: responder 404 para evitar oráculos de existencia en disco
+    abort(404)
 
 
 # ============================================================
