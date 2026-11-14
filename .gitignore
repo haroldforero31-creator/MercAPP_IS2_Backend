@@ -21,3 +21,6 @@ test_smoke.db
 test_stress.db
 .secret_key
 instance/
+
+*backup*.db
+
