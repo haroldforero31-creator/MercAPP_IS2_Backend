@@ -233,12 +233,12 @@
             <p style="color: var(--text-muted); margin-bottom: 20px;">¿Qué productos deseas descargar a Excel (CSV)?</p>
             
             <label style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px; cursor: pointer;">
-                <input id="input_exportMode" aria-label="Exportmode" type="radio" name="exportMode" value="all" checked onchange="document.getElementById('exportCategorySelect').style.display='none'" style="accent-color: var(--primary); width: 18px; height: 18px;">
+                <input id="input_exportMode_all" aria-label="Todo el inventario" type="radio" name="exportMode" value="all" checked onchange="document.getElementById('exportCategorySelect').style.display='none'" style="accent-color: var(--primary); width: 18px; height: 18px;">
                 <span style="font-weight: 600;">Todo el inventario</span>
             </label>
             
             <label style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px; cursor: pointer;">
-                <input id="input_exportMode" aria-label="Exportmode" type="radio" name="exportMode" value="category" onchange="document.getElementById('exportCategorySelect').style.display='block'" style="accent-color: var(--primary); width: 18px; height: 18px;">
+                <input id="input_exportMode_category" aria-label="Por categorías específicas" type="radio" name="exportMode" value="category" onchange="document.getElementById('exportCategorySelect').style.display='block'" style="accent-color: var(--primary); width: 18px; height: 18px;">
                 <span style="font-weight: 600;">Por categorías específicas</span>
             </label>
             
