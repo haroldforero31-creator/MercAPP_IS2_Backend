@@ -1,3 +1,17 @@
+"""
+Módulo de Seguridad Centralizada — MercAPP POS
+==============================================
+Este módulo implementa las políticas de seguridad estricta para el cumplimiento
+del estándar OWASP Top 10 y el aseguramiento del Quality Gate de SonarCloud.
+
+Funcionalidades de Blindaje:
+- Validación y sanitización de URLs de redirección (CWE-601 Open Redirect).
+- Prevención de Directory Traversal y Filesystem Oracle en recursos estáticos (CWE-22 / CWE-209).
+- Generación de tokens criptográficos con entropía robusta de 256 bits (CWE-330).
+- Verificación estricta de orígenes CORS y cabeceras de seguridad HTTP.
+- Sanitización de entradas de usuario contra Cross-Site Scripting (XSS / CWE-79).
+"""
+
 from werkzeug.security import generate_password_hash, check_password_hash
 from urllib.parse import urlparse
 
