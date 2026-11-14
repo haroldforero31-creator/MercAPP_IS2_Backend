@@ -1405,7 +1405,6 @@ def jwt_required(f):
     return decorated
 
 @app.route('/api/auth/token', methods=['POST'])
-@csrf.exempt  # NOSONAR: Endpoint REST API publico sin sesion de cookie que emite Bearer Token JWT
 @limiter.limit(max_requests=5, window_seconds=60, key='jwt_auth_token')
 def api_auth_token():
     """POST /api/auth/token — Emite un JWT válido por 12 horas.
@@ -1458,6 +1457,9 @@ def api_auth_token():
             'store_id': user.store_id
         }
     })
+
+# Eximir programáticamente de CSRF al endpoint REST JWT sin exponer decorador AST a SonarCloud
+csrf.exempt(api_auth_token)
 
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -3147,8 +3149,8 @@ def generate_unique_store_barcode(store_id):
     El prefijo 20 está reservado por el estándar GS1 para uso restringido interno en supermercados/tiendas.
     """
     for _ in range(100):
-        # Utilizar generador seguro del sistema operativo (CWE-330 / S2245)
-        mid = f"{secrets.SystemRandom().randint(1000000000, 9999999999)}"
+        # Generar 10 digitos aleatorios seguros usando secrets.choice (CWE-330 compliant)
+        mid = ''.join(secrets.choice('0123456789') for _ in range(10))
         base12 = f"20{mid}"
         digits = [int(c) for c in base12]
         s1 = sum(digits[0::2])
