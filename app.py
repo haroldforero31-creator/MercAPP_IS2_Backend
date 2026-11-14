@@ -6196,7 +6196,8 @@ def read_weight_from_port(port, timeout=2):
                 except: pass
                     
                 for l in reversed(raw_lines):
-                    match = re.search(r'[+-]?\s*(\d+(?:\.\d+)?)\s*(kg|g|lb)?', l, re.IGNORECASE)
+                    l_clean = l.strip()
+                    match = re.search(r'([0-9]+(?:\.[0-9]+)?)\s*(kg|g|lb)?', l_clean, re.IGNORECASE)
                     if match:
                         val_str = match.group(1)
                         unit = (match.group(2) or '').lower()
