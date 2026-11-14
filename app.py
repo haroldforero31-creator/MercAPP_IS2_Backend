@@ -2163,6 +2163,30 @@ def proveedor_login_view():
     return render_template('proveedor_login.html')
 
 
+@app.route('/proveedor/demo-login', endpoint='proveedor_demo_login')
+@app.route('/proveedor/acceso-rapido')
+def proveedor_demo_login():
+    """Acceso rápido directo para pruebas visuales del portal de proveedores sin login manual."""
+    supplier = Supplier.query.filter_by(email='proveedor@mercapp.com').first()
+    if not supplier:
+        supplier = Supplier(
+            company_name='Distribuidora Mayorista MercAPP',
+            contact_name='Carlos Mendoza (Encargado)',
+            phone='3105559876',
+            email='proveedor@mercapp.com',
+            password_hash=generate_password_hash('Proveedor123!'),
+            status='ACTIVO'
+        )
+        db.session.add(supplier)
+        db.session.commit()
+    else:
+        supplier.status = 'ACTIVO'
+        db.session.commit()
+    login_user(supplier)
+    flash(f'¡Bienvenido! Sesión de prueba iniciada como {supplier.company_name}.', 'success')
+    return redirect(url_for('proveedor_tiendas'))
+
+
 @app.route('/p/logout')
 @app.route('/proveedor/logout', endpoint='proveedor_logout')
 @login_required
