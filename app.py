@@ -123,10 +123,13 @@ if _cors_origins_raw and _cors_origins_raw != '*':
         }
     })
 else:
-    # Sin origenes configurados: permitir cualquier origen pero SIN credenciales (seguro)
+    # Sin origenes configurados: permitir dominios de la aplicacion y localhost sin credenciales (seguro)
     CORS(app, resources={
         r"/api/*": {
-            "origins": "*",
+            "origins": [
+                r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+                r"^https://.*\.onrender\.com$"
+            ],
             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
             "allow_headers": ["Content-Type", "Authorization"],
             "supports_credentials": False
@@ -612,12 +615,9 @@ def send_verification_email(email, code):
 
         threading.Thread(target=_async_send, daemon=True).start()
         return True
-    except BaseException as e:
+    except Exception as e:
         print(f"MAIL ERROR: {str(e)}")
-        return True
-    except BaseException as e:
-        print(f"MAIL ERROR: {str(e)}")
-        return True
+        return False
 
 def send_reset_email(user, token):
     """Send password reset link to user."""
@@ -646,12 +646,9 @@ def send_reset_email(user, token):
             send_email_unified(user.email, subject, html_content)
         threading.Thread(target=_async_send, daemon=True).start()
         return True
-    except BaseException as e:
+    except Exception as e:
         print(f"MAIL ERROR: {e}")
-        return True
-    except BaseException as e:
-        print(f"MAIL ERROR: {e}")
-        return True
+        return False
 
 
 def send_credit_sale_invoice(client, sale, sale_items):
@@ -1408,7 +1405,7 @@ def jwt_required(f):
     return decorated
 
 @app.route('/api/auth/token', methods=['POST'])
-@csrf.exempt
+@csrf.exempt  # NOSONAR: Endpoint REST API publico sin sesion de cookie que emite Bearer Token JWT
 @limiter.limit(max_requests=5, window_seconds=60, key='jwt_auth_token')
 def api_auth_token():
     """POST /api/auth/token — Emite un JWT válido por 12 horas.
@@ -3150,7 +3147,8 @@ def generate_unique_store_barcode(store_id):
     El prefijo 20 está reservado por el estándar GS1 para uso restringido interno en supermercados/tiendas.
     """
     for _ in range(100):
-        mid = f"{random.randint(1000000000, 9999999999)}"
+        # Utilizar generador seguro del sistema operativo (CWE-330 / S2245)
+        mid = f"{secrets.SystemRandom().randint(1000000000, 9999999999)}"
         base12 = f"20{mid}"
         digits = [int(c) for c in base12]
         s1 = sum(digits[0::2])
@@ -6196,7 +6194,7 @@ def read_weight_from_port(port, timeout=2):
                 except: pass
                     
                 for l in reversed(raw_lines):
-                    match = re.search(r'[+-]?\s*(\d+\.?\d*)\s*(kg|g|lb)?', l, re.IGNORECASE)
+                    match = re.search(r'[+-]?\s*(\d+(?:\.\d+)?)\s*(kg|g|lb)?', l, re.IGNORECASE)
                     if match:
                         val_str = match.group(1)
                         unit = (match.group(2) or '').lower()
