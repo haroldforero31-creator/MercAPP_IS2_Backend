@@ -4761,6 +4761,24 @@ def api_category_products(category_id):
     })
 
 
+def _get_or_create_custom_product(store_id):
+    """Obtener o crear el producto generico para items personalizados (Varios)."""
+    product = Product.query.filter_by(store_id=store_id, barcode='__CUSTOM__').first()
+    if not product:
+        fallback_cat = Category.query.filter_by(store_id=store_id).first()
+        product = Product(
+            store_id=store_id,
+            name='Varios',
+            price=0,
+            category_id=fallback_cat.id if fallback_cat else None,
+            is_active=False,
+            barcode='__CUSTOM__'
+        )
+        db.session.add(product)
+        db.session.flush()
+    return product
+
+
 @app.route('/api/sale', methods=['POST'])
 @login_required
 def api_process_sale():
@@ -4784,22 +4802,7 @@ def api_process_sale():
                 custom_price = int(item.get('custom_price', 0))
                 if custom_price <= 0:
                     return jsonify({'success': False, 'message': 'Precio inválido para producto personalizado.'}), 400
-                product = Product.query.filter_by(
-                    store_id=current_user.store_id,
-                    barcode='__CUSTOM__'
-                ).first()
-                if not product:
-                    fallback_cat = Category.query.filter_by(store_id=current_user.store_id).first()
-                    product = Product(
-                        store_id=current_user.store_id,
-                        name='Varios',
-                        price=0,
-                        category_id=fallback_cat.id if fallback_cat else None,
-                        is_active=False,
-                        barcode='__CUSTOM__'
-                    )
-                    db.session.add(product)
-                    db.session.flush()
+                product = _get_or_create_custom_product(current_user.store_id)
             else:
                 product = db.session.get(Product, item.get('product_id'))
                 if not product or product.store_id != current_user.store_id or not product.is_active:
@@ -5029,28 +5032,11 @@ def api_credit_sale():
         
         for item in items:
             if item.get('is_custom'):
-                custom_name = item.get('custom_name', 'Varios').strip()
-                if not custom_name: custom_name = 'Varios'
+                custom_name = item.get('custom_name', 'Varios').strip() or 'Varios'
                 custom_price = int(item.get('custom_price', 0))
                 if custom_price <= 0:
                     return jsonify({'success': False, 'message': 'Precio inválido para producto personalizado.'}), 400
-                
-                # Reuse single Varios product per store
-                product = Product.query.filter_by(
-                    store_id=current_user.store_id, barcode='__CUSTOM__'
-                ).first()
-                if not product:
-                    fallback_cat = Category.query.filter_by(store_id=current_user.store_id).first()
-                    product = Product(
-                        store_id=current_user.store_id,
-                        name='Varios',
-                        price=0,
-                        category_id=fallback_cat.id if fallback_cat else None,
-                        is_active=False,
-                        barcode='__CUSTOM__'
-                    )
-                    db.session.add(product)
-                    db.session.flush()
+                product = _get_or_create_custom_product(current_user.store_id)
             else:
                 product = db.session.get(Product, item.get('product_id'))
                 if not product or product.store_id != current_user.store_id or not product.is_active:
@@ -5765,6 +5751,29 @@ def api_hardware_open_drawer():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
+# ============================================================
+# ESC/POS Thermal Printing Helpers
+# ============================================================
+ESCPOS_ESC = b'\x1b'
+ESCPOS_GS = b'\x1d'
+ESCPOS_INIT = ESCPOS_ESC + b'@'
+ESCPOS_ALIGN_CENTER = ESCPOS_ESC + b'a\x01'
+ESCPOS_ALIGN_LEFT = ESCPOS_ESC + b'a\x00'
+ESCPOS_BOLD_ON = ESCPOS_ESC + b'E\x01'
+ESCPOS_BOLD_OFF = ESCPOS_ESC + b'E\x00'
+ESCPOS_CUT = ESCPOS_GS + b'V\x42\x00'
+
+def _build_escpos_line(text, center=False, bold=False):
+    cmd = b''
+    if center: cmd += ESCPOS_ALIGN_CENTER
+    else: cmd += ESCPOS_ALIGN_LEFT
+    if bold: cmd += ESCPOS_BOLD_ON
+    safe_text = unidecode.unidecode(text) if HW_AVAILABLE else text
+    cmd += safe_text.encode('ascii', errors='replace') + b'\n'
+    if bold: cmd += ESCPOS_BOLD_OFF
+    return cmd
+
+
 @app.route('/api/hardware/print', methods=['POST'])
 @login_required
 def api_hardware_print():
@@ -5783,29 +5792,9 @@ def api_hardware_print():
     settings = get_store_settings()
     
     try:
-        ESC = b'\x1b'
-        GS = b'\x1d'
-        INIT = ESC + b'@'
-        ALIGN_CENTER = ESC + b'a\x01'
-        ALIGN_LEFT = ESC + b'a\x00'
-        BOLD_ON = ESC + b'E\x01'
-        BOLD_OFF = ESC + b'E\x00'
-        CUT = GS + b'V\x42\x00'
-        
-        lines = []
+        lines = [ESCPOS_INIT]
         def add_line(text, center=False, bold=False):
-            cmd = b''
-            if center: cmd += ALIGN_CENTER
-            else: cmd += ALIGN_LEFT
-            if bold: cmd += BOLD_ON
-            
-            safe_text = unidecode.unidecode(text)
-            cmd += safe_text.encode('ascii', errors='replace') + b'\n'
-            
-            if bold: cmd += BOLD_OFF
-            lines.append(cmd)
-            
-        lines.append(INIT)
+            lines.append(_build_escpos_line(text, center=center, bold=bold))
         add_line(settings.store_name, center=True, bold=True)
         add_line(f"NIT: {settings.nit}", center=True)
         add_line(f"Dir: {settings.direccion}", center=True)
@@ -5834,7 +5823,7 @@ def api_hardware_print():
         add_line(settings.mensaje_ticket, center=True)
         add_line(" ", center=True)
         add_line(" ", center=True)
-        lines.append(CUT)
+        lines.append(ESCPOS_CUT)
         
         raw_data = b''.join(lines)
     except Exception as e:
@@ -5920,29 +5909,9 @@ def api_hardware_print_summary():
     try:
         hPrinter = win32print.OpenPrinter(printer_name)
         try:
-            ESC = b'\x1b'
-            GS = b'\x1d'
-            INIT = ESC + b'@'
-            ALIGN_CENTER = ESC + b'a\x01'
-            ALIGN_LEFT = ESC + b'a\x00'
-            BOLD_ON = ESC + b'E\x01'
-            BOLD_OFF = ESC + b'E\x00'
-            CUT = GS + b'V\x42\x00'
-            
-            lines = []
+            lines = [ESCPOS_INIT]
             def add_line(text, center=False, bold=False):
-                cmd = b''
-                if center: cmd += ALIGN_CENTER
-                else: cmd += ALIGN_LEFT
-                if bold: cmd += BOLD_ON
-                
-                safe_text = unidecode.unidecode(text)
-                cmd += safe_text.encode('ascii', errors='replace') + b'\n'
-                
-                if bold: cmd += BOLD_OFF
-                lines.append(cmd)
-                
-            lines.append(INIT)
+                lines.append(_build_escpos_line(text, center=center, bold=bold))
             add_line(settings.store_name, center=True, bold=True)
             add_line("RESUMEN DE VENTAS", center=True, bold=True)
             add_line("------------------------------------------", center=True)
@@ -5965,7 +5934,7 @@ def api_hardware_print_summary():
             add_line(" ", center=True)
             add_line(" ", center=True)
             
-            lines.append(CUT)
+            lines.append(ESCPOS_CUT)
             
             raw_data = b''.join(lines)
             
@@ -6005,29 +5974,9 @@ def api_hardware_print_debt():
     try:
         hPrinter = win32print.OpenPrinter(printer_name)
         try:
-            ESC = b'\x1b'
-            GS = b'\x1d'
-            INIT = ESC + b'@'
-            ALIGN_CENTER = ESC + b'a\x01'
-            ALIGN_LEFT = ESC + b'a\x00'
-            BOLD_ON = ESC + b'E\x01'
-            BOLD_OFF = ESC + b'E\x00'
-            CUT = GS + b'V\x42\x00'
-            
-            lines = []
+            lines = [ESCPOS_INIT]
             def add_line(text, center=False, bold=False):
-                cmd = b''
-                if center: cmd += ALIGN_CENTER
-                else: cmd += ALIGN_LEFT
-                if bold: cmd += BOLD_ON
-                
-                safe_text = unidecode.unidecode(text)
-                cmd += safe_text.encode('ascii', errors='replace') + b'\n'
-                
-                if bold: cmd += BOLD_OFF
-                lines.append(cmd)
-                
-            lines.append(INIT)
+                lines.append(_build_escpos_line(text, center=center, bold=bold))
             add_line(settings.store_name, center=True, bold=True)
             add_line("ESTADO DE CUENTA - FIADO", center=True, bold=True)
             add_line("--------------------------------", center=True)
@@ -6068,7 +6017,7 @@ def api_hardware_print_debt():
             add_line(" ", center=True)
             add_line(" ", center=True)
             add_line(" ", center=True)
-            lines.append(CUT)
+            lines.append(ESCPOS_CUT)
             
             raw_data = b''.join(lines)
             
