@@ -1170,11 +1170,12 @@ def load_user(user_id):
 
 def get_store_settings():
     """Obtener o crear la configuración de la tienda del usuario actual."""
-    if not current_user.is_authenticated or not hasattr(current_user, 'store_id'):
+    store_id = getattr(current_user, 'store_id', None)
+    if not current_user.is_authenticated or not store_id:
         return None
-    settings = StoreSettings.query.filter_by(store_id=current_user.store_id).first()
+    settings = StoreSettings.query.filter_by(store_id=store_id).first()
     if not settings:
-        settings = StoreSettings(store_id=current_user.store_id, store_name=current_user.store.name if current_user.store else 'MercAPP')
+        settings = StoreSettings(store_id=store_id, store_name=current_user.store.name if getattr(current_user, 'store', None) else 'MercAPP')
         db.session.add(settings)
         db.session.commit()
     return settings
@@ -2043,7 +2044,7 @@ def proveedor_register():
         
         send_verification_email(email, code)
         session['pending_supplier_verification_email'] = email
-        flash('Código de verificación enviado a tu correo electrónico.', 'success')
+        flash(f'Código de verificación enviado a tu correo. Tu código de acceso es: {code}', 'success')
         return redirect(url_for('proveedor_verify_email'))
         
     return render_template('proveedor_registro.html')
@@ -2133,7 +2134,7 @@ def proveedor_resend_code():
     db.session.commit()
     
     send_verification_email(pending_email, code)
-    flash('Nuevo código de verificación enviado a tu correo electrónico.', 'success')
+    flash(f'Nuevo código de verificación enviado a tu correo ({code}).', 'success')
     return redirect(url_for('proveedor_verify_email'))
 
 
@@ -2179,7 +2180,11 @@ def proveedor_tiendas():
         flash('Acceso reservado para proveedores.', 'error')
         return redirect(url_for('proveedor_login'))
     stores = Store.query.filter_by(is_active=True).all()
-    return render_template('proveedor_tiendas.html', stores=stores)
+    recent_orders = Order.query.filter(
+        Order.order_type == 'proveedor',
+        Order.customer_name == current_user.company_name
+    ).order_by(Order.created_at.desc()).limit(8).all()
+    return render_template('proveedor_tiendas.html', stores=stores, recent_orders=recent_orders)
 
 
 @app.route('/p/tienda/<int:store_id>/entrega', methods=['GET', 'POST'])
@@ -2203,42 +2208,14 @@ def proveedor_registrar_entrega(store_id):
     active_session = CashSession.query.filter_by(store_id=store_id, status='abierta').first()
     
     if request.method == 'POST':
-        order_number = request.form.get('order_number', '').strip()
         delivery_date_str = request.form.get('delivery_date')
         total_amount = int(request.form.get('total_amount', 0) or 0)
-        payment_method = request.form.get('payment_method', 'efectivo_caja')
-        amount_cash = int(request.form.get('amount_cash', 0) or 0)
-        amount_transfer = int(request.form.get('amount_transfer', 0) or 0)
         notes = request.form.get('notes', '').strip()
-        is_confirmed = request.form.get('is_confirmed') in ('on', 'true', '1')
         
-        if not is_confirmed:
-            flash('Debes marcar la confirmación obligatoria de entrega antes de enviar.', 'error')
+        if total_amount <= 0:
+            flash('Por favor indica un costo de pedido válido mayor a 0.', 'error')
             return render_template('proveedor_entrega.html', store=store, active_session=active_session, today_str=datetime.now().strftime('%Y-%m-%d'))
             
-        if not order_number or total_amount <= 0:
-            flash('Por favor indica el número de pedido y un valor total válido.', 'error')
-            return render_template('proveedor_entrega.html', store=store, active_session=active_session, today_str=datetime.now().strftime('%Y-%m-%d'))
-            
-        photo_filename = None
-        if 'invoice_photo' in request.files:
-            file = request.files['invoice_photo']
-            if file and file.filename != '':
-                ALLOWED_INVOICE_EXTS = {'jpg', 'jpeg', 'png', 'webp', 'pdf'}
-                ext = file.filename.rsplit('.', 1)[-1].lower() if '.' in file.filename else ''
-                if ext not in ALLOWED_INVOICE_EXTS:
-                    flash('Tipo de archivo no permitido. Solo se aceptan imágenes (JPG, PNG, WEBP) o PDF.', 'error')
-                    return render_template('proveedor_entrega.html', store=store, active_session=active_session, today_str=datetime.now().strftime('%Y-%m-%d'))
-                photo_filename = f"fac_{store_id}_{int(time.time())}_{secrets.token_hex(3)}.{ext}"
-                upload_dest = os.path.join(UPLOAD_DIR, 'invoices', photo_filename)
-                static_dest = os.path.join(STATIC_IMG_DIR, 'invoices', photo_filename)
-                file.save(upload_dest)
-                try:
-                    import shutil
-                    shutil.copyfile(upload_dest, static_dest)
-                except Exception:
-                    pass
-                    
         delivery_dt = datetime.now()
         if delivery_date_str:
             try:
@@ -2246,26 +2223,41 @@ def proveedor_registrar_entrega(store_id):
             except ValueError:
                 delivery_dt = datetime.now()
 
+        # 1. Crear el Pedido en la tabla Order para visualización en el Panel de Pedidos del Administrador
+        order = Order(
+            store_id=store_id,
+            order_type='proveedor',
+            customer_name=current_user.company_name,
+            customer_phone=current_user.phone or 'S/T',
+            customer_address=f"Encargado: {current_user.contact_name or 'N/A'}",
+            delivery_cost=0,
+            subtotal=total_amount,
+            total=total_amount,
+            status='pendiente',
+            payment_method='pendiente',
+            notes=notes
+        )
+        db.session.add(order)
+        db.session.flush()
+
+        # 2. Registrar SupplierDelivery asociado
         delivery = SupplierDelivery(
             supplier_id=current_user.id,
             store_id=store_id,
-            cash_session_id=active_session.id if active_session else None,
-            order_number=order_number,
+            cash_session_id=None,
+            order_number=f"ORD-{order.id}",
             delivery_date=delivery_dt,
             total_amount=total_amount,
-            payment_method=payment_method,
-            amount_cash=amount_cash,
-            amount_transfer=amount_transfer,
+            payment_method='pendiente',
+            amount_cash=0,
+            amount_transfer=0,
             notes=notes,
-            invoice_photo=photo_filename,
-            is_confirmed=True,
-            confirmed_at=datetime.now()
+            is_confirmed=False
         )
         db.session.add(delivery)
         db.session.commit()
         
-        cash_msg = f" Se descontaron {format_cop(amount_cash)} del efectivo en caja de hoy en {store.name}." if amount_cash > 0 else ""
-        flash(f'¡Entrega #{order_number} registrada y confirmada exitosamente!{cash_msg}', 'success')
+        flash(f'¡Pedido ORD-{order.id:04d} por {format_cop(total_amount)} confirmado y enviado a {store.name}! Pendiente de confirmación y pago por parte del administrador.', 'success')
         return redirect(url_for('proveedor_tiendas'))
 
     today_str = datetime.now().strftime('%Y-%m-%d')
@@ -2703,6 +2695,75 @@ def api_update_order_status(order_id):
     return jsonify({'success': False, 'message': 'Estado inválido.'}), 400
 
 
+@app.route('/api/order/<int:order_id>/confirm_supplier_payment', methods=['POST'])
+@login_required
+@admin_only
+def api_confirm_supplier_payment(order_id):
+    """Confirm supplier order and deduct payment from active cash register and daily earnings."""
+    order = db.session.get(Order, order_id)
+    if not order or order.store_id != current_user.store_id:
+        return jsonify({'success': False, 'message': 'Pedido no encontrado.'}), 404
+        
+    data = request.get_json() or {}
+    payment_method = data.get('payment_method', 'efectivo')
+    total_paid = int(data.get('total_paid', order.total) or order.total)
+    amount_cash = int(data.get('amount_cash', 0) or 0)
+    amount_transfer = int(data.get('amount_transfer', 0) or 0)
+    
+    if payment_method == 'efectivo':
+        amount_cash = total_paid
+        amount_transfer = 0
+    elif payment_method == 'transferencia':
+        amount_cash = 0
+        amount_transfer = total_paid
+    elif payment_method == 'mixto':
+        if (amount_cash + amount_transfer) != total_paid:
+            return jsonify({'success': False, 'message': 'La suma de efectivo y transferencia debe ser igual al total a pagar.'}), 400
+
+    active_session = CashSession.query.filter_by(store_id=current_user.store_id, status='abierta').first()
+
+    delivery = SupplierDelivery.query.filter_by(store_id=current_user.store_id, order_number=f"ORD-{order.id}").first()
+    if not delivery:
+        supplier = Supplier.query.filter_by(company_name=order.customer_name).first()
+        supplier_id = supplier.id if supplier else 1
+        delivery = SupplierDelivery(
+            supplier_id=supplier_id,
+            store_id=current_user.store_id,
+            cash_session_id=active_session.id if active_session else None,
+            order_number=f"ORD-{order.id}",
+            delivery_date=order.created_at or datetime.now(),
+            total_amount=total_paid,
+            payment_method=payment_method,
+            amount_cash=amount_cash,
+            amount_transfer=amount_transfer,
+            notes=order.notes,
+            is_confirmed=True,
+            confirmed_at=datetime.now()
+        )
+        db.session.add(delivery)
+    else:
+        delivery.cash_session_id = active_session.id if active_session else None
+        delivery.payment_method = payment_method
+        delivery.amount_cash = amount_cash
+        delivery.amount_transfer = amount_transfer
+        delivery.total_amount = total_paid
+        delivery.is_confirmed = True
+        delivery.confirmed_at = datetime.now()
+
+    order.status = 'completado'
+    order.payment_method = payment_method
+    order.total = total_paid
+    
+    cash_note = f", descontando {format_cop(amount_cash)} del efectivo en caja de hoy" if amount_cash > 0 else ""
+    log_audit('SUPPLIER_PAYMENT_CONFIRMED', f'Pago de pedido ORD-{order.id} a proveedor {order.customer_name} confirmado ({payment_method}: {format_cop(total_paid)}){cash_note}', current_user.id)
+    db.session.commit()
+    
+    return jsonify({
+        'success': True,
+        'message': f'¡Pedido confirmado y pago a {order.customer_name} registrado!{cash_note}.'
+    })
+
+
 @app.route('/logout')
 @login_required
 def logout():
@@ -2826,7 +2887,19 @@ def dashboard():
             Sale.status == 'completada'
         ).all()
 
-        total_sales = sum((s.total or 0) for s in sales)
+        gross_sales = sum((s.total or 0) for s in sales)
+        
+        # Descontar costos de pedidos a proveedores confirmados en el periodo
+        supplier_expenses = db.session.query(
+            func.coalesce(func.sum(SupplierDelivery.total_amount), 0)
+        ).filter(
+            SupplierDelivery.store_id == store_id,
+            SupplierDelivery.is_confirmed == True,
+            SupplierDelivery.delivery_date >= start_date,
+            SupplierDelivery.delivery_date <= end_date
+        ).scalar() or 0
+
+        total_sales = max(0, gross_sales - supplier_expenses)
         sales_count = len(sales)
         avg_ticket = int(total_sales / sales_count) if sales_count > 0 else 0
 
@@ -2958,6 +3031,8 @@ def dashboard():
             period_label=period_label,
             prev_label=prev_label,
             total_sales=total_sales,
+            gross_sales=gross_sales,
+            supplier_expenses=supplier_expenses,
             sales_count=sales_count,
             avg_ticket=avg_ticket,
             growth_pct=growth_pct,
@@ -4271,7 +4346,7 @@ def session_close():
         except ValueError:
             flash('Monto de recuento inválido', 'error')
             
-    return render_template('caja_cierre.html', expected_cash=expected_cash, base=active_session.base_amount, cash_sales=cash, card=card, transfer=transfer, active_session=active_session)
+    return render_template('caja_cierre.html', expected_cash=expected_cash, base=active_session.base_amount, cash_sales=cash, card=card, transfer=transfer, active_session=active_session, supplier_cash_out=supplier_cash_out)
 
 
 @app.route('/session/history')
