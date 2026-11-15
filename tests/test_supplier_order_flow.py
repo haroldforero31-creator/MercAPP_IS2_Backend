@@ -216,3 +216,49 @@ def test_supplier_order_creation_and_admin_confirmation(test_setup):
         assert updated_delivery.amount_cash == 100000
         assert updated_delivery.amount_transfer == 50000
         assert updated_delivery.cash_session_id is not None
+
+
+def test_supplier_ui_isolation_and_no_admin_navbar(test_setup):
+    """Test supplier UI has NO admin navbar (no Caja, Ventas, Deudas) and NO demo bypass."""
+    app.config['TESTING'] = True
+    app.config['WTF_CSRF_ENABLED'] = False
+    supplier_get_id = test_setup['supplier_get_id']
+
+    with app.test_client() as client:
+        # 1. Login page: ensure no demo bypass
+        login_res = client.get('/proveedor/login')
+        assert login_res.status_code == 200
+        assert b"Acceso R\xc3\xa1pido Demo" not in login_res.data
+        assert b"Rellenar Datos de Prueba" not in login_res.data
+        assert b"autoFillDemoSupplier" not in login_res.data
+
+        # 2. Authenticated supplier visits stores list
+        with client.session_transaction() as sess:
+            sess['_user_id'] = supplier_get_id
+            sess['_fresh'] = True
+
+        tiendas_res = client.get('/proveedor/tiendas')
+        assert tiendas_res.status_code == 200
+        # Assert NO admin navigation items
+        assert b'class="navbar"' not in tiendas_res.data
+        assert b'<a href="/pos"' not in tiendas_res.data
+        assert b'<span class="nav-text">Caja</span>' not in tiendas_res.data
+        assert b'<span class="nav-text">Ventas</span>' not in tiendas_res.data
+        assert b'<span class="nav-text">Deudas</span>' not in tiendas_res.data
+        assert b'<span class="nav-text">Historial</span>' not in tiendas_res.data
+        # Assert supplier header is present
+        assert b"Tiendas Disponibles" in tiendas_res.data
+        assert b"Proveedor:" in tiendas_res.data
+
+        # 3. Authenticated supplier visits delivery page
+        entrega_res = client.get('/proveedor/tienda/1/entrega')
+        assert entrega_res.status_code == 200
+        assert b'class="navbar"' not in entrega_res.data
+        assert b'<span class="nav-text">Caja</span>' not in entrega_res.data
+        assert b"Solicitud de Pedido / Despacho" in entrega_res.data
+        assert b"Fecha de Pedido" in entrega_res.data
+        assert b"Costo del Pedido" in entrega_res.data
+
+        # 4. Supplier logout via standard /logout or /proveedor/logout doesn't throw 500
+        logout_std = client.get('/logout', follow_redirects=True)
+        assert logout_std.status_code == 200

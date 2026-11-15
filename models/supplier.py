@@ -40,6 +40,11 @@ class Supplier(UserMixin, db.Model):
         return f"supplier_{self.id}"
 
     @property
+    def name(self):
+        """Nombre para compatibilidad con vistas y sesiones."""
+        return self.contact_name or self.company_name or self.email
+
+    @property
     def is_admin(self):
         return False
 
