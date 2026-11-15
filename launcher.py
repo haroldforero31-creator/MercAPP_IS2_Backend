@@ -139,6 +139,9 @@ def open_desktop_window(port):
         webbrowser.open(target_url)
 
 if __name__ == '__main__':
+    # Modo Escritorio para Administradores y Cajeros (oculta paneles de clientes y proveedores)
+    os.environ['MERCAPP_DESKTOP_MODE'] = 'True'
+
     # Determine port
     env_port = os.getenv('PORT')
     if env_port and env_port.isdigit():

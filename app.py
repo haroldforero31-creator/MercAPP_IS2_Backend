@@ -33,7 +33,9 @@ if getattr(sys, 'frozen', False):
     base_dir = os.path.dirname(sys.executable)
     bundle_dir = getattr(sys, '_MEIPASS', base_dir)
     cand_frontend = os.path.join(bundle_dir, 'MercAPP_IS2_Frontend')
-    if os.path.exists(cand_frontend):
+    if os.path.exists(os.path.join(base_dir, 'templates')):
+        frontend_dir = base_dir
+    elif os.path.exists(cand_frontend):
         frontend_dir = cand_frontend
     elif os.path.exists(os.path.join(bundle_dir, 'templates')):
         frontend_dir = bundle_dir
@@ -1257,7 +1259,15 @@ def inject_globals():
         except Exception:
             pending_orders = 0
 
+    is_desktop_mode = (
+        getattr(sys, 'frozen', False)
+        or os.getenv('MERCAPP_DESKTOP_MODE', 'False').lower() in ('1', 'true', 'yes')
+        or (request.args.get('mode') == 'admin')
+        or (request.args.get('desktop') == '1')
+    )
+
     return dict(
+        is_desktop_mode=is_desktop_mode,
         cashier_mode=is_cashier_mode() if current_user.is_authenticated and isinstance(current_user, User) else False,
         active_cashier_name=session.get('active_cashier_name', None),
         active_cashier_id=session.get('active_cashier_id', None),

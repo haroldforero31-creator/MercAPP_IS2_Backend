@@ -35,6 +35,8 @@ a = Analysis(
         'models.user',
         'models.product',
         'models.sale',
+        'models.supplier',
+        'models.customer',
         'controllers',
         'dtos',
         'repositories',
