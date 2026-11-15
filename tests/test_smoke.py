@@ -69,7 +69,9 @@ def setup_database():
     # Teardown
     with app.app_context():
         db.session.remove()
-        db.drop_all()
+        uri = str(app.config.get('SQLALCHEMY_DATABASE_URI', ''))
+        if 'test' in uri:
+            db.drop_all()
     if os.path.exists(TEST_DB_PATH):
         try:
             os.remove(TEST_DB_PATH)

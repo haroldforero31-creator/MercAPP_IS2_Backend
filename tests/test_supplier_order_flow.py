@@ -1,7 +1,7 @@
 import pytest
 from app import app, db
 from models.user import Store, User, StoreSettings
-from models.supplier import Supplier, SupplierDelivery
+from models.supplier import Supplier, SupplierDelivery, SupplierEmailVerification
 from models.sale import Order, CashSession
 from werkzeug.security import generate_password_hash
 from datetime import datetime
@@ -9,7 +9,7 @@ from datetime import datetime
 @pytest.fixture
 def test_setup():
     with app.app_context():
-        store = Store.query.get(1)
+        store = db.session.get(Store, 1)
         if not store:
             store = Store(id=1, name="MercAPP Supermercado Central", is_active=True)
             db.session.add(store)
@@ -47,7 +47,7 @@ def test_setup():
             db.session.add(session_obj)
             db.session.commit()
 
-        # Supplier
+        # Supplier for direct order test
         supplier_email = "proveedor_flujo@lacteos.com"
         supplier = Supplier.query.filter_by(email=supplier_email).first()
         if not supplier:
@@ -70,7 +70,89 @@ def test_setup():
         }
 
 
+def test_supplier_registration_and_email_verification():
+    """Test full supplier registration, 6-digit code generation and email verification."""
+    app.config['TESTING'] = True
+    app.config['WTF_CSRF_ENABLED'] = False
+
+    test_email = "nuevo_proveedor_test@distribuidor.com"
+    with app.test_client() as client:
+        # Clean previous if exists
+        with app.app_context():
+            Supplier.query.filter_by(email=test_email).delete()
+            SupplierEmailVerification.query.filter_by(email=test_email).delete()
+            db.session.commit()
+
+        # 1. Register supplier
+        reg_data = {
+            'company_name': 'Distribuidora Mayorista ABC',
+            'contact_name': 'Mauricio Rojas',
+            'phone': '3151234567',
+            'email': test_email,
+            'password': 'Password123!'
+        }
+        res_reg = client.post('/proveedor/registro', data=reg_data, follow_redirects=True)
+        assert res_reg.status_code == 200
+
+        # Verify in DB that verification record was created with 6-digit code
+        with app.app_context():
+            verif = SupplierEmailVerification.query.filter_by(email=test_email, verified=False).first()
+            assert verif is not None
+            assert len(verif.code) == 6
+            assert verif.code.isdigit()
+            saved_code = verif.code
+
+        # 2. Submit verification code
+        res_code = client.post('/proveedor/verificar-email', data={'code': saved_code}, follow_redirects=True)
+        assert res_code.status_code == 200
+        assert b"Distribuidora Mayorista ABC" in res_code.data or b"Tiendas Disponibles" in res_code.data
+
+        # 3. Verify in DB that Supplier is now ACTIVO
+        with app.app_context():
+            new_sup = Supplier.query.filter_by(email=test_email).first()
+            assert new_sup is not None
+            assert new_sup.status == 'ACTIVO'
+            assert new_sup.check_password('Password123!') is True
+
+
+def test_supplier_login_and_logout():
+    """Test supplier manual login with credentials and session persistence."""
+    app.config['TESTING'] = True
+    app.config['WTF_CSRF_ENABLED'] = False
+
+    supplier_email = "proveedor_login_test@carnicos.com"
+    with app.app_context():
+        sup = Supplier.query.filter_by(email=supplier_email).first()
+        if not sup:
+            sup = Supplier(
+                company_name="Cárnicos la Granja",
+                contact_name="Pedro Martínez",
+                phone="3209871234",
+                email=supplier_email,
+                password_hash=generate_password_hash("Carnes2026!"),
+                status='ACTIVO'
+            )
+            db.session.add(sup)
+            db.session.commit()
+
+    with app.test_client() as client:
+        # Invalid password
+        bad_login = client.post('/proveedor/login', data={'email': supplier_email, 'password': 'WrongPassword'}, follow_redirects=True)
+        assert bad_login.status_code == 200
+        assert b"incorrectas" in bad_login.data
+
+        # Valid login
+        good_login = client.post('/proveedor/login', data={'email': supplier_email, 'password': 'Carnes2026!'}, follow_redirects=True)
+        assert good_login.status_code == 200
+        assert b"C\xc3\xa1rnicos la Granja" in good_login.data or b"Tiendas" in good_login.data
+
+        # Logout
+        logout_resp = client.get('/proveedor/logout', follow_redirects=True)
+        assert logout_resp.status_code == 200
+
+
 def test_supplier_order_creation_and_admin_confirmation(test_setup):
+    """Test supplier submitting order and admin confirming with mixed cash/transfer."""
     app.config['TESTING'] = True
     app.config['WTF_CSRF_ENABLED'] = False
     store_id = test_setup['store_id']
