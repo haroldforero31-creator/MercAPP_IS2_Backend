@@ -552,10 +552,11 @@ def send_email_unified(to_email, subject, html_content):
     import smtplib
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
+    from email.header import Header
     from email.utils import formatdate, make_msgid
 
     msg = MIMEMultipart('alternative')
-    msg['Subject'] = subject
+    msg['Subject'] = Header(subject, 'utf-8')
     msg['From'] = f"MercAPP <{mail_user}>"
     msg['To'] = to_email
     msg['Date'] = formatdate(localtime=True)
@@ -569,22 +570,39 @@ def send_email_unified(to_email, subject, html_content):
     try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=10) as server:
             server.login(mail_user, mail_pass)
-            server.sendmail(mail_user, to_email, msg.as_string())
+            server.send_message(msg)
             print(f"[MAIL SUCCESS 465] Correo entregado exitosamente vía SSL a {to_email}")
             return True
     except Exception as e465:
         print(f"[MAIL 465] Aviso: {e465}")
+        try:
+            with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=10) as server:
+                server.login(mail_user, mail_pass)
+                server.sendmail(mail_user, to_email, msg.as_bytes())
+                print(f"[MAIL SUCCESS 465 bytes] Correo entregado exitosamente vía SSL a {to_email}")
+                return True
+        except Exception:
+            pass
 
     # 3. Intento por Gmail SMTP (Puerto 587 TLS)
     try:
         with smtplib.SMTP('smtp.gmail.com', 587, timeout=10) as server:
             server.starttls()
             server.login(mail_user, mail_pass)
-            server.sendmail(mail_user, to_email, msg.as_string())
+            server.send_message(msg)
             print(f"[MAIL SUCCESS 587] Correo entregado exitosamente vía TLS a {to_email}")
             return True
     except Exception as e587:
         print(f"[MAIL 587] Aviso: {e587}")
+        try:
+            with smtplib.SMTP('smtp.gmail.com', 587, timeout=10) as server:
+                server.starttls()
+                server.login(mail_user, mail_pass)
+                server.sendmail(mail_user, to_email, msg.as_bytes())
+                print(f"[MAIL SUCCESS 587 bytes] Correo entregado exitosamente vía TLS a {to_email}")
+                return True
+        except Exception:
+            pass
 
     return False
 
@@ -2055,6 +2073,11 @@ def proveedor_register():
             return redirect(url_for('proveedor_login'))
             
         code = ''.join([str(secrets.randbelow(10)) for _ in range(6)])
+        
+        # Limpiar solicitudes pendientes previas para este correo
+        SupplierEmailVerification.query.filter_by(email=email, verified=False).delete()
+        db.session.commit()
+
         verification = SupplierEmailVerification(
             company_name=company_name,
             contact_name=contact_name,
