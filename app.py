@@ -2274,12 +2274,20 @@ def proveedor_registrar_entrega(store_id):
     
     if request.method == 'POST':
         delivery_date_str = request.form.get('delivery_date')
-        total_amount = int(request.form.get('total_amount', 0) or 0)
+        raw_amount = str(request.form.get('total_amount', '0')).replace('.', '').replace(',', '').replace('$', '').strip()
+        try:
+            total_amount = int(float(raw_amount or 0))
+        except (ValueError, TypeError):
+            total_amount = 0
+
         notes = request.form.get('notes', '').strip()
         
         if total_amount <= 0:
-            flash('Por favor indica un costo de pedido válido mayor a 0.', 'error')
+            flash('Por favor indica un costo de pedido válido mayor a 0 pesos colombianos.', 'error')
             return render_template('proveedor_entrega.html', store=store, active_session=active_session, today_str=datetime.now().strftime('%Y-%m-%d'))
+            
+        if total_amount % 50 != 0:
+            total_amount = int(round(total_amount / 50.0) * 50)
             
         delivery_dt = datetime.now()
         if delivery_date_str:
