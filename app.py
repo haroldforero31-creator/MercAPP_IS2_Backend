@@ -552,16 +552,22 @@ def send_email_unified(to_email, subject, html_content):
     import smtplib
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
+    from email.utils import formatdate, make_msgid
 
     msg = MIMEMultipart('alternative')
     msg['Subject'] = subject
     msg['From'] = f"MercAPP <{mail_user}>"
     msg['To'] = to_email
+    msg['Date'] = formatdate(localtime=True)
+    msg['Message-ID'] = make_msgid(domain='gmail.com')
+
+    plain_text = f"MercAPP - Código de Verificación\n\nTu código de verificación es: {subject.split(':')[-1].strip()}\n\nEste código expira en 10 minutos."
+    msg.attach(MIMEText(plain_text, 'plain', 'utf-8'))
     msg.attach(MIMEText(html_content, 'html', 'utf-8'))
 
     # 2. Intento por Gmail SMTPS (Puerto 465 SSL)
     try:
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=8) as server:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=10) as server:
             server.login(mail_user, mail_pass)
             server.sendmail(mail_user, to_email, msg.as_string())
             print(f"[MAIL SUCCESS 465] Correo entregado exitosamente vía SSL a {to_email}")
@@ -571,7 +577,7 @@ def send_email_unified(to_email, subject, html_content):
 
     # 3. Intento por Gmail SMTP (Puerto 587 TLS)
     try:
-        with smtplib.SMTP('smtp.gmail.com', 587, timeout=8) as server:
+        with smtplib.SMTP('smtp.gmail.com', 587, timeout=10) as server:
             server.starttls()
             server.login(mail_user, mail_pass)
             server.sendmail(mail_user, to_email, msg.as_string())
@@ -585,25 +591,24 @@ def send_email_unified(to_email, subject, html_content):
 
 def send_verification_email(email, code):
     """Send a verification code to the specified email address via unified mail engine."""
-    print("\n" + "="*50)
-    print(f"CODIGO DE VERIFICACION PARA {email}: {code}")
-    print("="*50 + "\n")
+    print("\n" + "="*50, flush=True)
+    print(f"CODIGO DE VERIFICACION PARA {email}: {code}", flush=True)
+    print("="*50 + "\n", flush=True)
     try:
         subject = f'MercAPP - Tu código de verificación: {code}'
         html_content = f"""
         <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 30px; background: #1A1F2E; color: #E8EAED; border-radius: 16px;">
             <div style="text-align: center; margin-bottom: 24px;">
-                <img src="https://mercapp-deploy.onrender.com/static/images/mercapp_brand_logo.png" alt="MercAPP Logo" width="56" height="56" style="margin-bottom: 8px; border-radius: 8px;" onerror="this.style.display='none'">
-                <h1 style="font-size: 1.8rem; margin: 8px 0 4px; background: linear-gradient(135deg, #2E7D32, #FFA726); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">MercAPP</h1>
+                <h1 style="font-size: 1.8rem; margin: 8px 0 4px; color: #43A047;">MercAPP</h1>
                 <p style="color: #9AA0A6; font-size: 0.9rem;">Sistema de Supermercado</p>
             </div>
             <hr style="border: none; border-top: 1px solid #2D3344; margin: 20px 0;">
             <p style="font-size: 1rem; text-align: center;">Tu código de verificación es:</p>
             <div style="text-align: center; margin: 24px 0;">
-                <span style="font-size: 2.5rem; font-weight: 900; letter-spacing: 12px; color: #FFA726; background: rgba(255,143,0,0.1); padding: 16px 32px; border-radius: 12px; border: 2px solid rgba(255,143,0,0.3);">{code}</span>
+                <span style="font-size: 2.5rem; font-weight: 900; letter-spacing: 12px; color: #43A047; background: rgba(67, 160, 71, 0.1); padding: 16px 32px; border-radius: 12px; border: 2px solid rgba(67, 160, 71, 0.3);">{code}</span>
             </div>
             <p style="font-size: 0.9rem; color: #9AA0A6; text-align: center;">
-                Este código expira en <strong style="color: #FFA726;">10 minutos</strong>.<br>
+                Este código expira en <strong style="color: #43A047;">10 minutos</strong>.<br>
                 Si no solicitaste este código, ignora este mensaje.
             </p>
             <hr style="border: none; border-top: 1px solid #2D3344; margin: 20px 0;">
@@ -613,12 +618,18 @@ def send_verification_email(email, code):
         </div>
         """
         def _async_send():
-            send_email_unified(email, subject, html_content)
+            try:
+                res = send_email_unified(email, subject, html_content)
+                print(f"[MAIL-DELIVERY] to={email} status={'OK' if res else 'FAIL'}", flush=True)
+            except Exception as exc:
+                print(f"[MAIL-DELIVERY-ERROR] to={email} error={exc}", flush=True)
 
-        threading.Thread(target=_async_send, daemon=True).start()
+        t = threading.Thread(target=_async_send, daemon=True)
+        t.start()
+        t.join(timeout=1.5)
         return True
     except Exception as e:
-        print(f"MAIL ERROR: {str(e)}")
+        print(f"MAIL ERROR: {str(e)}", flush=True)
         return False
 
 def send_reset_email(user, token):
@@ -2058,7 +2069,7 @@ def proveedor_register():
         
         send_verification_email(email, code)
         session['pending_supplier_verification_email'] = email
-        flash(f'Código de verificación generado y enviado. Tu código de acceso es: {code}', 'success')
+        flash('Código de verificación enviado a tu correo electrónico. Por favor ingrésalo a continuación.', 'success')
         return redirect(url_for('proveedor_verify_email'))
         
     return render_template('proveedor_registro.html')
@@ -2091,11 +2102,11 @@ def proveedor_verify_email():
         
         if expired:
             flash('El código ha expirado. Solicita uno nuevo.', 'error')
-            return render_template('proveedor_verificar_email.html', email=pending_email, expired=True, demo_code=verification.code)
+            return render_template('proveedor_verificar_email.html', email=pending_email, expired=True)
             
         if verification.attempts >= 5:
             flash('Demasiados intentos fallidos. Solicita un nuevo código.', 'error')
-            return render_template('proveedor_verificar_email.html', email=pending_email, expired=True, demo_code=verification.code)
+            return render_template('proveedor_verificar_email.html', email=pending_email, expired=True)
             
         if entered_code == verification.code:
             verification.verified = True
@@ -2122,7 +2133,7 @@ def proveedor_verify_email():
             remaining = 5 - verification.attempts
             flash(f'Código incorrecto. Te quedan {remaining} intentos.', 'error')
             
-    return render_template('proveedor_verificar_email.html', email=pending_email, expired=expired, demo_code=verification.code)
+    return render_template('proveedor_verificar_email.html', email=pending_email, expired=expired)
 
 
 @app.route('/p/resend-code', methods=['POST'])
@@ -2148,7 +2159,7 @@ def proveedor_resend_code():
     db.session.commit()
     
     send_verification_email(pending_email, code)
-    flash(f'Nuevo código de verificación enviado a tu correo ({code}).', 'success')
+    flash('Hemos enviado un nuevo código de verificación a tu correo.', 'success')
     return redirect(url_for('proveedor_verify_email'))
 
 
@@ -2190,30 +2201,13 @@ def proveedor_login_view():
 @app.route('/proveedor/demo-login', endpoint='proveedor_demo_login')
 @app.route('/proveedor/acceso-rapido')
 def proveedor_demo_login():
-    """Acceso rápido directo para pruebas visuales del portal de proveedores sin login manual."""
-    supplier = Supplier.query.filter_by(email='proveedor@mercapp.com').first()
-    if not supplier:
-        supplier = Supplier(
-            company_name='Distribuidora Mayorista MercAPP',
-            contact_name='Carlos Mendoza (Encargado)',
-            phone='3105559876',
-            email='proveedor@mercapp.com',
-            password_hash=generate_password_hash('Proveedor123!'),
-            status='ACTIVO'
-        )
-        db.session.add(supplier)
-        db.session.commit()
-    else:
-        supplier.status = 'ACTIVO'
-        db.session.commit()
-    login_user(supplier)
-    flash(f'¡Bienvenido! Sesión de prueba iniciada como {supplier.company_name}.', 'success')
-    return redirect(url_for('proveedor_tiendas'))
+    """Ruta demo retirada: se exige registro y credenciales verificadas."""
+    flash('Debes registrarte e iniciar sesión con tus credenciales verificadas de proveedor.', 'info')
+    return redirect(url_for('proveedor_login'))
 
 
 @app.route('/p/logout')
 @app.route('/proveedor/logout', endpoint='proveedor_logout')
-@login_required
 def proveedor_logout():
     logout_user()
     flash('Has cerrado sesión del portal de proveedores.', 'info')
@@ -2334,29 +2328,7 @@ def admin_proveedores_entregas():
 @app.route('/proveedor/portal', endpoint='proveedor_portal')
 @login_required
 def proveedor_portal():
-    if not isinstance(current_user, Supplier):
-        flash('Acceso exclusivo para proveedores autorizados.', 'error')
-        return redirect(url_for('proveedor_login'))
-    
-    orders = PurchaseOrder.query.filter_by(supplier_id=current_user.id).order_by(PurchaseOrder.created_at.desc()).all()
-    invoices = SupplierInvoice.query.filter_by(supplier_id=current_user.id).order_by(SupplierInvoice.due_date.asc()).all()
-    sid = current_user.store_id or (Store.query.first().id if Store.query.first() else 1)
-    products = Product.query.filter_by(store_id=sid, is_active=True).all()
-    
-    total_invoiced = sum(inv.total_amount for inv in invoices)
-    total_paid = sum(inv.paid_amount for inv in invoices)
-    total_pending = max(0, total_invoiced - total_paid)
-
-    return render_template(
-        'proveedor_portal.html',
-        supplier=current_user,
-        orders=orders,
-        invoices=invoices,
-        products=products,
-        total_invoiced=total_invoiced,
-        total_paid=total_paid,
-        total_pending=total_pending
-    )
+    return redirect(url_for('proveedor_tiendas'))
 
 
 @app.route('/api/p/order/<int:order_id>/status', methods=['POST'])
@@ -2815,11 +2787,14 @@ def api_confirm_supplier_payment(order_id):
 @app.route('/logout')
 @login_required
 def logout():
-    user_name = current_user.name
+    user_name = getattr(current_user, 'name', None) or getattr(current_user, 'contact_name', None) or getattr(current_user, 'company_name', 'Usuario')
     user_id = current_user.id if isinstance(current_user, User) else None
     if user_id:
         log_audit('LOGOUT', f'Cierre de sesión de {user_name}', user_id)
+    is_supp = isinstance(current_user, Supplier)
     logout_user()
+    if is_supp:
+        return redirect(url_for('proveedor_login'))
     return redirect(url_for('login'))
 
 
