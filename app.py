@@ -2021,13 +2021,17 @@ def proveedor_register():
         email = request.form.get('email', '').strip().lower()
         password = request.form.get('password', '')
         
-        if not company_name or not contact_name or not email or not password:
-            flash('Por favor completa todos los campos obligatorios.', 'error')
+        if not company_name or not contact_name or not phone or not email or not password:
+            flash('Todos los campos son obligatorios: Nombre de la Empresa, Encargado, Teléfono, Correo y Contraseña.', 'error')
+            return render_template('proveedor_registro.html')
+
+        if len(password) < 6:
+            flash('La contraseña debe tener un mínimo de 6 caracteres.', 'error')
             return render_template('proveedor_registro.html')
             
         if Supplier.query.filter_by(email=email).first():
-            flash('El correo ya se encuentra registrado como proveedor.', 'error')
-            return redirect(url_for('proveedor_register'))
+            flash('El correo ya se encuentra registrado como proveedor. Por favor inicia sesión.', 'error')
+            return redirect(url_for('proveedor_login'))
             
         code = ''.join([str(secrets.randbelow(10)) for _ in range(6)])
         verification = SupplierEmailVerification(
@@ -2044,7 +2048,7 @@ def proveedor_register():
         
         send_verification_email(email, code)
         session['pending_supplier_verification_email'] = email
-        flash(f'Código de verificación enviado a tu correo. Tu código de acceso es: {code}', 'success')
+        flash(f'Código de verificación generado y enviado. Tu código de acceso es: {code}', 'success')
         return redirect(url_for('proveedor_verify_email'))
         
     return render_template('proveedor_registro.html')
@@ -2077,11 +2081,11 @@ def proveedor_verify_email():
         
         if expired:
             flash('El código ha expirado. Solicita uno nuevo.', 'error')
-            return render_template('proveedor_verificar_email.html', email=pending_email, expired=True)
+            return render_template('proveedor_verificar_email.html', email=pending_email, expired=True, demo_code=verification.code)
             
         if verification.attempts >= 5:
             flash('Demasiados intentos fallidos. Solicita un nuevo código.', 'error')
-            return render_template('proveedor_verificar_email.html', email=pending_email, expired=True)
+            return render_template('proveedor_verificar_email.html', email=pending_email, expired=True, demo_code=verification.code)
             
         if entered_code == verification.code:
             verification.verified = True
@@ -2108,7 +2112,7 @@ def proveedor_verify_email():
             remaining = 5 - verification.attempts
             flash(f'Código incorrecto. Te quedan {remaining} intentos.', 'error')
             
-    return render_template('proveedor_verificar_email.html', email=pending_email, expired=expired)
+    return render_template('proveedor_verificar_email.html', email=pending_email, expired=expired, demo_code=verification.code)
 
 
 @app.route('/p/resend-code', methods=['POST'])
@@ -2148,6 +2152,11 @@ def proveedor_login_view():
     if request.method == 'POST':
         email = (request.form.get('email') or '').strip().lower()
         password = request.form.get('password', '')
+
+        if not email or not password:
+            flash('Por favor ingresa tu correo y contraseña.', 'error')
+            return render_template('proveedor_login.html')
+
         supplier = Supplier.query.filter_by(email=email).first()
         
         if supplier and supplier.check_password(password):
@@ -2158,6 +2167,11 @@ def proveedor_login_view():
             flash(f'¡Bienvenido de nuevo, {supplier.company_name}!', 'success')
             return redirect(url_for('proveedor_tiendas'))
         else:
+            pending_verif = SupplierEmailVerification.query.filter_by(email=email, verified=False).first()
+            if pending_verif and check_password_hash(pending_verif.password_hash, password):
+                session['pending_supplier_verification_email'] = email
+                flash('Tu cuenta de proveedor aún no ha sido verificada. Ingresa a continuación el código de 6 dígitos.', 'info')
+                return redirect(url_for('proveedor_verify_email'))
             flash('Credenciales de proveedor incorrectas. Verifica tu correo y contraseña.', 'error')
             
     return render_template('proveedor_login.html')
