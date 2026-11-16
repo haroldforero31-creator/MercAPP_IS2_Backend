@@ -889,6 +889,152 @@ def send_credit_payment_receipt(client, payment, previous_debt):
         return False
 
 
+def send_supplier_payment_confirmation_email(supplier, order, delivery, store, admin_name):
+    """
+    Envía soporte/comprobante oficial de confirmación y pago de pedido por correo al proveedor.
+    Se ejecuta de forma asíncrona para no retrasar la confirmación en caja.
+    """
+    if not supplier or not getattr(supplier, 'email', None):
+        return False
+
+    to_email = supplier.email.strip()
+    if not to_email or '@' not in to_email:
+        return False
+
+    store_name = store.name if store else "MercAPP Store"
+    date_str = datetime.now().strftime('%d/%m/%Y %I:%M %p')
+    order_num = f"ORD-{order.id:04d}" if order else (delivery.order_number if delivery else 'ORD-0000')
+    total_cop = format_cop(delivery.total_amount if delivery else (order.total if order else 0))
+    method_name = delivery.payment_method.capitalize() if delivery else 'Efectivo'
+    amount_cash = delivery.amount_cash if delivery else 0
+    amount_transfer = delivery.amount_transfer if delivery else 0
+    notes_text = order.notes if order and order.notes else 'Entrega conforme sin observaciones.'
+
+    cash_row = ""
+    transfer_row = ""
+    if delivery and delivery.payment_method == 'mixto':
+        cash_row = f"""
+        <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+            <span style="color: #94A3B8;">💵 Efectivo en Caja:</span>
+            <span style="color: #4ADE80; font-weight: 700;">{format_cop(amount_cash)}</span>
+        </div>
+        """
+        transfer_row = f"""
+        <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+            <span style="color: #94A3B8;">📲 Transferencia Bancaria:</span>
+            <span style="color: #60A5FA; font-weight: 700;">{format_cop(amount_transfer)}</span>
+        </div>
+        """
+    elif delivery and delivery.payment_method == 'efectivo':
+        cash_row = f"""
+        <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+            <span style="color: #94A3B8;">💵 Pago en Efectivo:</span>
+            <span style="color: #4ADE80; font-weight: 700;">{total_cop}</span>
+        </div>
+        """
+    elif delivery and delivery.payment_method == 'transferencia':
+        transfer_row = f"""
+        <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+            <span style="color: #94A3B8;">📲 Transferencia Bancaria:</span>
+            <span style="color: #60A5FA; font-weight: 700;">{total_cop}</span>
+        </div>
+        """
+
+    subject = f"Comprobante Oficial de Pago {order_num} - {store_name}"
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="es">
+    <head><meta charset="utf-8"></head>
+    <body style="margin: 0; padding: 0; background-color: #0b0f19; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+        <div style="max-width: 600px; margin: 30px auto; background-color: #111827; border-radius: 16px; overflow: hidden; border: 1px solid #1f2937; box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
+            <div style="background: linear-gradient(135deg, #1b5e20, #2e7d32); padding: 32px 24px; text-align: center;">
+                <div style="display: inline-block; background: rgba(255,255,255,0.15); padding: 8px 18px; border-radius: 30px; margin-bottom: 12px;">
+                    <span style="color: #FFFFFF; font-weight: 800; font-size: 1rem; letter-spacing: 1px;">✓ PAGO CONFIRMADO EN CAJA</span>
+                </div>
+                <h1 style="color: #ffffff; margin: 0; font-size: 1.6rem; font-weight: 800;">{store_name}</h1>
+                <p style="color: #a5d6a7; margin: 6px 0 0; font-size: 0.95rem;">Comprobante Oficial de Liquidación a Proveedor</p>
+            </div>
+
+            <div style="padding: 28px 24px; color: #e5e7eb;">
+                <p style="margin: 0 0 16px; font-size: 0.95rem; line-height: 1.5; color: #d1d5db;">
+                    Estimado/a <strong style="color: #ffffff;">{supplier.company_name}</strong> (Attn: {supplier.contact_name or 'Administración'}):
+                </p>
+                <p style="margin: 0 0 20px; font-size: 0.9rem; line-height: 1.5; color: #9ca3af;">
+                    El administrador <strong style="color: #ffffff;">{admin_name}</strong> de la tienda <strong style="color: #ffffff;">{store_name}</strong> ha verificado la recepción de tu despacho y ha liquidado el pago en caja correspondiente al pedido <strong style="color: #4ade80;">{order_num}</strong>.
+                </p>
+
+                <!-- Total -->
+                <div style="background: rgba(34, 197, 94, 0.08); border: 2px solid rgba(34, 197, 94, 0.3); border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 24px;">
+                    <span style="font-size: 0.8rem; font-weight: 700; color: #4ade80; text-transform: uppercase; letter-spacing: 1px;">Monto Total Liquidado</span>
+                    <div style="font-size: 2.2rem; font-weight: 900; color: #ffffff; margin-top: 4px;">{total_cop}</div>
+                    <span style="display: inline-block; margin-top: 6px; padding: 3px 12px; border-radius: 12px; font-size: 0.75rem; font-weight: 700; background: rgba(34, 197, 94, 0.2); color: #4ade80;">
+                        Modalidad: {method_name}
+                    </span>
+                </div>
+
+                <!-- Detalle -->
+                <div style="background: #1f2937; border-radius: 12px; padding: 18px; margin-bottom: 20px; border: 1px solid #374151;">
+                    <div style="font-size: 0.8rem; font-weight: 700; color: #9ca3af; text-transform: uppercase; margin-bottom: 12px; border-bottom: 1px solid #374151; padding-bottom: 6px;">
+                        Detalles del Comprobante
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                        <span style="color: #94A3B8;">Número de Pedido:</span>
+                        <span style="color: #ffffff; font-weight: 700;">{order_num}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                        <span style="color: #94A3B8;">Fecha y Hora:</span>
+                        <span style="color: #ffffff; font-weight: 600;">{date_str}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                        <span style="color: #94A3B8;">Tienda Receptora:</span>
+                        <span style="color: #ffffff; font-weight: 600;">{store_name}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                        <span style="color: #94A3B8;">Administrador en Caja:</span>
+                        <span style="color: #ffffff; font-weight: 600;">{admin_name}</span>
+                    </div>
+                    {cash_row}
+                    {transfer_row}
+                    <div style="background: rgba(0,0,0,0.3); border-radius: 8px; padding: 10px 12px; margin-top: 12px; font-size: 0.85rem; color: #CBD5E1; border-left: 3px solid #43A047;">
+                        <strong style="color: #A5D6A7;">Notas de Entrega:</strong> {notes_text}
+                    </div>
+                </div>
+
+                <div style="background: rgba(43, 160, 71, 0.08); border-left: 4px solid #43a047; padding: 14px 16px; border-radius: 6px; font-size: 0.82rem; color: #a5d6a7; line-height: 1.45; margin-bottom: 24px;">
+                    🔒 <strong>Soporte Oficial Contable:</strong> Este registro queda asentado formalmente en el libro contable de egresos de la tienda y en tu historial de despachos.
+                </div>
+
+                <div style="text-align: center;">
+                    <a href="https://mercapp-deploy.onrender.com/proveedor/pedidos" style="display: inline-block; background-color: #2e7d32; color: #ffffff; text-decoration: none; padding: 12px 28px; border-radius: 8px; font-weight: 700; font-size: 0.95rem;">
+                        Ver Mis Pedidos en el Portal ➔
+                    </a>
+                </div>
+            </div>
+
+            <div style="background-color: #0b0f19; padding: 18px 24px; text-align: center; border-top: 1px solid #1f2937; color: #6b7280; font-size: 0.78rem;">
+                © 2026 MercAPP POS & Gestión Comercial. Todos los derechos reservados.
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    app_obj = app._get_current_object() if hasattr(app, '_get_current_object') else app
+    def _async_send():
+        with app_obj.app_context():
+            try:
+                sent = send_email_unified(to_email, subject, html_content)
+                if sent:
+                    print(f"[MAIL-PROVEEDOR] Comprobante de pago para {order_num} enviado exitosamente a {to_email}")
+                else:
+                    print(f"[MAIL-PROVEEDOR] No se pudo enviar comprobante a {to_email}")
+            except Exception as e:
+                print(f"[MAIL-PROVEEDOR] Error en hilo de comprobante a {to_email}: {e}")
+
+    threading.Thread(target=_async_send, daemon=True).start()
+    return True
+
+
 def check_internet_connection(timeout=2.0):
     """Comprueba de forma rápida si el equipo tiene acceso a internet."""
     try:
@@ -1710,8 +1856,7 @@ def verify_email():
             remaining = 5 - verification.attempts
             flash(f'Código incorrecto. Te quedan {remaining} intentos.', 'error')
             
-    demo_code = verification.code if (os.getenv('RENDER') or session.get('email_delivery_failed') or request.args.get('demo') == '1' or session.get('show_demo_code')) else None
-    return render_template('verificar_email.html', email=pending_email, expired=expired, demo_code=demo_code)
+    return render_template('verificar_email.html', email=pending_email, expired=expired)
 
 
 @app.route('/resend-code', methods=['POST'])
@@ -1980,8 +2125,7 @@ def customer_verify_email():
             flash('Código de verificación incorrecto.', 'error')
             return render_template('customer_verificar_email.html', email=pending_email, expired=False)
             
-    demo_code = verification.code if (os.getenv('RENDER') or session.get('email_delivery_failed') or request.args.get('demo') == '1' or session.get('show_demo_code')) else None
-    return render_template('customer_verificar_email.html', email=pending_email, expired=expired, demo_code=demo_code)
+    return render_template('customer_verificar_email.html', email=pending_email, expired=expired)
 
 
 @app.route('/c/resend-code', methods=['POST'])
@@ -2147,8 +2291,7 @@ def proveedor_verify_email():
             remaining = 5 - verification.attempts
             flash(f'Código incorrecto. Te quedan {remaining} intentos.', 'error')
             
-    demo_code = verification.code if (os.getenv('RENDER') or session.get('email_delivery_failed') or request.args.get('demo') == '1' or session.get('show_demo_code')) else None
-    return render_template('proveedor_verificar_email.html', email=pending_email, expired=expired, demo_code=demo_code)
+    return render_template('proveedor_verificar_email.html', email=pending_email, expired=expired)
 
 
 @app.route('/p/resend-code', methods=['POST'])
@@ -2244,6 +2387,20 @@ def proveedor_tiendas():
     return render_template('proveedor_tiendas.html', stores=stores, recent_orders=recent_orders)
 
 
+@app.route('/p/pedidos')
+@app.route('/proveedor/pedidos', endpoint='proveedor_pedidos')
+@login_required
+def proveedor_pedidos():
+    if not isinstance(current_user, Supplier):
+        flash('Acceso reservado para proveedores.', 'error')
+        return redirect(url_for('proveedor_login'))
+    orders = Order.query.filter(
+        Order.order_type == 'proveedor',
+        Order.customer_name == current_user.company_name
+    ).order_by(Order.created_at.desc()).all()
+    return render_template('proveedor_pedidos.html', orders=orders)
+
+
 @app.route('/p/tienda/<int:store_id>/entrega', methods=['GET', 'POST'])
 @app.route('/proveedor/tienda/<int:store_id>/entrega', endpoint='proveedor_registrar_entrega', methods=['GET', 'POST'])
 @login_required
@@ -2322,8 +2479,8 @@ def proveedor_registrar_entrega(store_id):
         db.session.add(delivery)
         db.session.commit()
         
-        flash(f'¡Pedido ORD-{order.id:04d} por {format_cop(total_amount)} confirmado y enviado a {store.name}! Pendiente de confirmación y pago por parte del administrador.', 'success')
-        return redirect(url_for('proveedor_tiendas'))
+        flash(f'¡Pedido ORD-{order.id:04d} por {format_cop(total_amount)} confirmado y enviado a {store.name}! Esperando confirmación y pago por parte del administrador.', 'success')
+        return redirect(url_for('proveedor_pedidos'))
 
     today_str = datetime.now().strftime('%Y-%m-%d')
     return render_template('proveedor_entrega.html', store=store, active_session=active_session, today_str=today_str)
@@ -2749,10 +2906,24 @@ def api_confirm_supplier_payment(order_id):
         
     data = request.get_json() or {}
     payment_method = data.get('payment_method', 'efectivo')
-    total_paid = int(data.get('total_paid', order.total) or order.total)
-    amount_cash = int(data.get('amount_cash', 0) or 0)
-    amount_transfer = int(data.get('amount_transfer', 0) or 0)
     
+    # Validación estricta contra números negativos y valores inconsistentes
+    try:
+        raw_total = str(data.get('total_paid', order.total) if data.get('total_paid') is not None else order.total)
+        total_paid = int(float(raw_total.replace('.', '').replace(',', '').replace('$', '').strip() or order.total))
+        raw_cash = str(data.get('amount_cash', 0) if data.get('amount_cash') is not None else 0)
+        amount_cash = int(float(raw_cash.replace('.', '').replace(',', '').replace('$', '').strip() or 0))
+        raw_transfer = str(data.get('amount_transfer', 0) if data.get('amount_transfer') is not None else 0)
+        amount_transfer = int(float(raw_transfer.replace('.', '').replace(',', '').replace('$', '').strip() or 0))
+    except (ValueError, TypeError):
+        return jsonify({'success': False, 'message': 'Los valores numéricos ingresados no son válidos.'}), 400
+
+    if total_paid <= 0:
+        return jsonify({'success': False, 'message': 'El total a pagar debe ser mayor a 0 pesos.'}), 400
+
+    if amount_cash < 0 or amount_transfer < 0:
+        return jsonify({'success': False, 'message': 'No se permiten montos negativos en efectivo ni en transferencia.'}), 400
+
     if payment_method == 'efectivo':
         amount_cash = total_paid
         amount_transfer = 0
@@ -2761,13 +2932,13 @@ def api_confirm_supplier_payment(order_id):
         amount_transfer = total_paid
     elif payment_method == 'mixto':
         if (amount_cash + amount_transfer) != total_paid:
-            return jsonify({'success': False, 'message': 'La suma de efectivo y transferencia debe ser igual al total a pagar.'}), 400
+            return jsonify({'success': False, 'message': f'La suma de efectivo (${amount_cash:,}) y transferencia (${amount_transfer:,}) debe coincidir exactamente con el total a pagar (${total_paid:,}).'}), 400
 
     active_session = CashSession.query.filter_by(store_id=current_user.store_id, status='abierta').first()
 
     delivery = SupplierDelivery.query.filter_by(store_id=current_user.store_id, order_number=f"ORD-{order.id}").first()
+    supplier = Supplier.query.filter_by(company_name=order.customer_name).first()
     if not delivery:
-        supplier = Supplier.query.filter_by(company_name=order.customer_name).first()
         supplier_id = supplier.id if supplier else 1
         delivery = SupplierDelivery(
             supplier_id=supplier_id,
@@ -2785,6 +2956,8 @@ def api_confirm_supplier_payment(order_id):
         )
         db.session.add(delivery)
     else:
+        if not supplier and delivery.supplier_id:
+            supplier = db.session.get(Supplier, delivery.supplier_id)
         delivery.cash_session_id = active_session.id if active_session else None
         delivery.payment_method = payment_method
         delivery.amount_cash = amount_cash
@@ -2801,9 +2974,17 @@ def api_confirm_supplier_payment(order_id):
     log_audit('SUPPLIER_PAYMENT_CONFIRMED', f'Pago de pedido ORD-{order.id} a proveedor {order.customer_name} confirmado ({payment_method}: {format_cop(total_paid)}){cash_note}', current_user.id)
     db.session.commit()
     
+    # Envío automático de soporte/comprobante oficial por correo al proveedor
+    store = db.session.get(Store, order.store_id)
+    admin_name = getattr(current_user, 'name', 'Administrador')
+    mail_note = ""
+    if supplier and supplier.email:
+        send_supplier_payment_confirmation_email(supplier, order, delivery, store, admin_name)
+        mail_note = f" Se ha enviado el soporte oficial de pago al correo {supplier.email}."
+    
     return jsonify({
         'success': True,
-        'message': f'¡Pedido confirmado y pago a {order.customer_name} registrado!{cash_note}.'
+        'message': f'¡Pedido confirmado y pago a {order.customer_name} registrado!{cash_note}.{mail_note}'
     })
 
 

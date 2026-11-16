@@ -175,7 +175,7 @@ def test_supplier_order_creation_and_admin_confirmation(test_setup):
 
     # 2. Verify in DB
     with app.app_context():
-        order = Order.query.filter_by(store_id=store_id, order_type='proveedor', status='pendiente').first()
+        order = Order.query.filter_by(store_id=store_id, order_type='proveedor', status='pendiente').order_by(Order.id.desc()).first()
         assert order is not None
         assert order.customer_name == "Lácteos del Valle SAS"
         assert order.total == 150000
@@ -262,3 +262,134 @@ def test_supplier_ui_isolation_and_no_admin_navbar(test_setup):
         # 4. Supplier logout via standard /logout or /proveedor/logout doesn't throw 500
         logout_std = client.get('/logout', follow_redirects=True)
         assert logout_std.status_code == 200
+
+
+def test_negative_numbers_rejected_in_supplier_payment(test_setup):
+    """Test strict rejection of negative numbers in supplier payment endpoint."""
+    app.config['TESTING'] = True
+    app.config['WTF_CSRF_ENABLED'] = False
+    admin_id = test_setup['admin_id']
+    store_id = test_setup['store_id']
+
+    with app.app_context():
+        order = Order(
+            store_id=store_id,
+            order_type='proveedor',
+            customer_name="Distribuidora Negativos Test",
+            customer_phone="3001234567",
+            customer_address="Calle 1 # 2-3",
+            delivery_cost=0,
+            subtotal=2000000,
+            total=2000000,
+            status='pendiente',
+            payment_method='pendiente'
+        )
+        db.session.add(order)
+        db.session.commit()
+        order_id = order.id
+
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess['_user_id'] = str(admin_id)
+            sess['_fresh'] = True
+
+        # Caso 1: Transferencia negativa (el caso de la foto: 1500000 y -500)
+        res1 = client.post(f'/api/order/{order_id}/confirm_supplier_payment', json={
+            'payment_method': 'mixto',
+            'total_paid': 2000000,
+            'amount_cash': 1500000,
+            'amount_transfer': -500
+        })
+        assert res1.status_code == 400
+        assert res1.get_json()['success'] is False
+        assert "negativos" in res1.get_json()['message'].lower()
+
+        # Caso 2: Efectivo negativo
+        res2 = client.post(f'/api/order/{order_id}/confirm_supplier_payment', json={
+            'payment_method': 'mixto',
+            'total_paid': 2000000,
+            'amount_cash': -50000,
+            'amount_transfer': 2050000
+        })
+        assert res2.status_code == 400
+        assert res2.get_json()['success'] is False
+
+        # Caso 3: Total negativo o 0
+        res3 = client.post(f'/api/order/{order_id}/confirm_supplier_payment', json={
+            'payment_method': 'efectivo',
+            'total_paid': -50000
+        })
+        assert res3.status_code == 400
+        assert res3.get_json()['success'] is False
+
+    with app.app_context():
+        to_del = db.session.get(Order, order_id)
+        if to_del:
+            db.session.delete(to_del)
+            db.session.commit()
+
+
+def test_supplier_views_mis_pedidos_and_statuses(test_setup):
+    """Test supplier viewing dedicated Mis Pedidos page with real-time badges and email voucher notification."""
+    app.config['TESTING'] = True
+    app.config['WTF_CSRF_ENABLED'] = False
+    supplier_get_id = test_setup['supplier_get_id']
+    admin_id = test_setup['admin_id']
+    store_id = test_setup['store_id']
+
+    # 1. Supplier creates order
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess['_user_id'] = supplier_get_id
+            sess['_fresh'] = True
+
+        resp_create = client.post(f'/proveedor/tienda/{store_id}/entrega', data={
+            'delivery_date': '2026-11-15',
+            'total_amount': '500000',
+            'notes': 'Despacho de prueba para Mis Pedidos'
+        }, follow_redirects=True)
+        assert resp_create.status_code == 200
+        # Redirected to Mis Pedidos
+        assert b"Mis Pedidos a Tiendas" in resp_create.data
+        assert b"Esperando confirmaci\xc3\xb3n del administrador" in resp_create.data
+        assert b"500.000" in resp_create.data
+
+        # Directly visit /proveedor/pedidos and /p/pedidos
+        res_pedidos = client.get('/proveedor/pedidos')
+        assert res_pedidos.status_code == 200
+        assert b"Esperando confirmaci\xc3\xb3n del administrador" in res_pedidos.data
+        assert b"Mis Pedidos" in res_pedidos.data
+
+        res_p = client.get('/p/pedidos')
+        assert res_p.status_code == 200
+
+    # 2. Admin confirms payment
+    with app.app_context():
+        order = Order.query.filter_by(store_id=store_id, order_type='proveedor', status='pendiente').order_by(Order.id.desc()).first()
+        order_id = order.id
+
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess['_user_id'] = str(admin_id)
+            sess['_fresh'] = True
+
+        res_confirm = client.post(f'/api/order/{order_id}/confirm_supplier_payment', json={
+            'payment_method': 'efectivo',
+            'total_paid': 500000,
+            'amount_cash': 500000,
+            'amount_transfer': 0
+        })
+        assert res_confirm.status_code == 200
+        assert res_confirm.get_json()['success'] is True
+        assert "comprobante" in res_confirm.get_json()['message'].lower() or "soporte" in res_confirm.get_json()['message'].lower()
+
+    # 3. Supplier visits /proveedor/pedidos again and sees Confirmado & Pagado
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess['_user_id'] = supplier_get_id
+            sess['_fresh'] = True
+
+        res_final = client.get('/proveedor/pedidos')
+        assert res_final.status_code == 200
+        assert b"Confirmado & Pagado" in res_final.data
+        assert b"Soporte oficial de liquidaci\xc3\xb3n y pago enviado al correo" in res_final.data
