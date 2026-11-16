@@ -1710,7 +1710,7 @@ def verify_email():
             remaining = 5 - verification.attempts
             flash(f'Código incorrecto. Te quedan {remaining} intentos.', 'error')
             
-    demo_code = verification.code if (request.args.get('demo') == '1' or session.get('show_demo_code')) else None
+    demo_code = verification.code if (os.getenv('RENDER') or session.get('email_delivery_failed') or request.args.get('demo') == '1' or session.get('show_demo_code')) else None
     return render_template('verificar_email.html', email=pending_email, expired=expired, demo_code=demo_code)
 
 
@@ -1980,7 +1980,7 @@ def customer_verify_email():
             flash('Código de verificación incorrecto.', 'error')
             return render_template('customer_verificar_email.html', email=pending_email, expired=False)
             
-    demo_code = verification.code if (request.args.get('demo') == '1' or session.get('show_demo_code')) else None
+    demo_code = verification.code if (os.getenv('RENDER') or session.get('email_delivery_failed') or request.args.get('demo') == '1' or session.get('show_demo_code')) else None
     return render_template('customer_verificar_email.html', email=pending_email, expired=expired, demo_code=demo_code)
 
 
@@ -2147,7 +2147,7 @@ def proveedor_verify_email():
             remaining = 5 - verification.attempts
             flash(f'Código incorrecto. Te quedan {remaining} intentos.', 'error')
             
-    demo_code = verification.code if (request.args.get('demo') == '1' or session.get('show_demo_code')) else None
+    demo_code = verification.code if (os.getenv('RENDER') or session.get('email_delivery_failed') or request.args.get('demo') == '1' or session.get('show_demo_code')) else None
     return render_template('proveedor_verificar_email.html', email=pending_email, expired=expired, demo_code=demo_code)
 
 
