@@ -1,0 +1,233 @@
+{
+  "info": {
+    "_postman_id": "mercapp-pos-is2-collection-2026",
+    "name": "MercAPP POS & Delivery API",
+    "description": "Colección de endpoints REST para MercAPP - Sistema de Supermercado y POS (Sustentación IS2 - 17 de Noviembre). Incluye autenticación JWT, operaciones de caja, ventas, catálogo, pedidos de clientes, despachos de proveedores y rutinas de base de datos.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:5001",
+      "type": "string"
+    },
+    {
+      "key": "jwtToken",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Autenticación & JWT (Criterio D)",
+      "item": [
+        {
+          "name": "Obtener Token JWT (/api/auth/token)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"admin@mercapp.com\",\n  \"password\": \"admin123\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/token",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "auth", "token"]
+            },
+            "description": "Genera un JSON Web Token (JWT) válido por 24 horas para consumir endpoints protegidos de la API."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Catálogo & Productos",
+      "item": [
+        {
+          "name": "Búsqueda Inteligente (/api/product/smart-search)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{jwtToken}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/product/smart-search?q=leche",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "product", "smart-search"],
+              "query": [{ "key": "q", "value": "leche" }]
+            }
+          }
+        },
+        {
+          "name": "Escanear Código de Barras (/api/product/scan/<barcode>)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{jwtToken}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/product/scan/7702001001",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "product", "scan", "7702001001"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Ventas & POS (Caja)",
+      "item": [
+        {
+          "name": "Registrar Venta POS (/api/sale)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{jwtToken}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\"product_id\": 1, \"quantity\": 2, \"price\": 4500}\n  ],\n  \"payment_method\": \"efectivo\",\n  \"amount_received\": 10000,\n  \"cash_session_id\": 1\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/sale",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "sale"]
+            }
+          }
+        },
+        {
+          "name": "Registrar Venta a Crédito / Fiado (/api/credit-sale)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{jwtToken}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"client_id\": 1,\n  \"items\": [\n    {\"product_id\": 1, \"quantity\": 1, \"price\": 4500}\n  ],\n  \"due_days\": 15,\n  \"notes\": \"Fiado autorizado por administrador\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/credit-sale",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "credit-sale"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Clientes & Pedidos a Domicilio",
+      "item": [
+        {
+          "name": "Crear Pedido de Cliente (/api/c/order)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"store_id\": 1,\n  \"delivery_type\": \"domicilio\",\n  \"items\": [\n    {\"product_id\": 1, \"quantity\": 2}\n  ],\n  \"notes\": \"Dejar en recepción de torre 2\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/c/order",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "c", "order"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Proveedores & Despachos de Mercancía",
+      "item": [
+        {
+          "name": "Confirmar Pago a Proveedor en Caja (/api/order/<id>/confirm_supplier_payment)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"payment_method\": \"efectivo\",\n  \"amount_cash\": 2000000,\n  \"amount_transfer\": 0,\n  \"notes\": \"Pago completo de pedido de mercancía\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/order/1/confirm_supplier_payment",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "order", "1", "confirm_supplier_payment"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Rutinas de Base de Datos (Criterio H - SPs & Triggers)",
+      "item": [
+        {
+          "name": "SP3: Reporte Ventas Diarias (/api/routines/sp-reporte-ventas-diarias)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/routines/sp-reporte-ventas-diarias",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "routines", "sp-reporte-ventas-diarias"]
+            }
+          }
+        },
+        {
+          "name": "SP5: Reorden de Stock Crítico (/api/routines/sp-reorden-stock)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/routines/sp-reorden-stock?umbral=5",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "routines", "sp-reorden-stock"],
+              "query": [{ "key": "umbral", "value": "5" }]
+            }
+          }
+        },
+        {
+          "name": "SP4: Abonar Deuda Cliente (/api/routines/sp-abonar-deuda)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"client_id\": 1,\n  \"amount\": 15000,\n  \"payment_method\": \"efectivo\",\n  \"notes\": \"Abono quincenal\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/routines/sp-abonar-deuda",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "routines", "sp-abonar-deuda"]
+            }
+          }
+        },
+        {
+          "name": "SP2: Cerrar Turno de Caja con Arqueo (/api/routines/sp-cerrar-turno-caja)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"session_id\": 1,\n  \"actual_cash\": 150000\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/routines/sp-cerrar-turno-caja",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "routines", "sp-cerrar-turno-caja"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
