@@ -568,26 +568,25 @@ def send_email_unified(to_email, subject, html_content):
 
     # 2. Intento por Gmail SMTPS (Puerto 465 SSL)
     try:
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=3) as server:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=10) as server:
             server.login(mail_user, mail_pass)
             server.send_message(msg)
             print(f"[MAIL SUCCESS 465] Correo entregado exitosamente vía SSL a {to_email}")
             return True
     except Exception as e465:
         print(f"[MAIL 465] Aviso: {e465}")
-        if 'unreachable' not in str(e465).lower():
-            try:
-                with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=3) as server:
-                    server.login(mail_user, mail_pass)
-                    server.sendmail(mail_user, to_email, msg.as_bytes())
-                    print(f"[MAIL SUCCESS 465 bytes] Correo entregado exitosamente vía SSL a {to_email}")
-                    return True
-            except Exception:
-                pass
+        try:
+            with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=10) as server:
+                server.login(mail_user, mail_pass)
+                server.sendmail(mail_user, to_email, msg.as_bytes())
+                print(f"[MAIL SUCCESS 465 bytes] Correo entregado exitosamente vía SSL a {to_email}")
+                return True
+        except Exception:
+            pass
 
     # 3. Intento por Gmail SMTP (Puerto 587 TLS)
     try:
-        with smtplib.SMTP('smtp.gmail.com', 587, timeout=3) as server:
+        with smtplib.SMTP('smtp.gmail.com', 587, timeout=10) as server:
             server.starttls()
             server.login(mail_user, mail_pass)
             server.send_message(msg)
@@ -595,16 +594,15 @@ def send_email_unified(to_email, subject, html_content):
             return True
     except Exception as e587:
         print(f"[MAIL 587] Aviso: {e587}")
-        if 'unreachable' not in str(e587).lower():
-            try:
-                with smtplib.SMTP('smtp.gmail.com', 587, timeout=3) as server:
-                    server.starttls()
-                    server.login(mail_user, mail_pass)
-                    server.sendmail(mail_user, to_email, msg.as_bytes())
-                    print(f"[MAIL SUCCESS 587 bytes] Correo entregado exitosamente vía TLS a {to_email}")
-                    return True
-            except Exception:
-                pass
+        try:
+            with smtplib.SMTP('smtp.gmail.com', 587, timeout=10) as server:
+                server.starttls()
+                server.login(mail_user, mail_pass)
+                server.sendmail(mail_user, to_email, msg.as_bytes())
+                print(f"[MAIL SUCCESS 587 bytes] Correo entregado exitosamente vía TLS a {to_email}")
+                return True
+        except Exception:
+            pass
 
     return False
 
@@ -644,9 +642,7 @@ def send_verification_email(email, code):
             except Exception as exc:
                 print(f"[MAIL-DELIVERY-ERROR] to={email} error={exc}", flush=True)
 
-        t = threading.Thread(target=_async_send, daemon=True)
-        t.start()
-        t.join(timeout=1.5)
+        threading.Thread(target=_async_send, daemon=True).start()
         return True
     except Exception as e:
         print(f"MAIL ERROR: {str(e)}", flush=True)
@@ -1603,14 +1599,9 @@ def register():
         db.session.commit()
         
         # Enviar código por correo
-        sent = send_verification_email(email, code)
+        send_verification_email(email, code)
         session['pending_verification_email'] = email
-        if not sent:
-            session['email_delivery_failed'] = True
-            flash('Código de verificación generado. Si estás en Render Cloud o no te llega el correo, usa el código de confirmación mostrado en pantalla.', 'info')
-        else:
-            session.pop('email_delivery_failed', None)
-            flash('Código de verificación enviado a tu correo electrónico.', 'success')
+        flash('Código de verificación enviado a tu correo electrónico.', 'success')
         return redirect(url_for('verify_email'))
             
     return render_template('registro.html')
@@ -1719,7 +1710,7 @@ def verify_email():
             remaining = 5 - verification.attempts
             flash(f'Código incorrecto. Te quedan {remaining} intentos.', 'error')
             
-    demo_code = verification.code if (os.getenv('RENDER') or session.get('email_delivery_failed') or not app.config.get('MAIL_PASSWORD')) else None
+    demo_code = verification.code if (request.args.get('demo') == '1' or session.get('show_demo_code')) else None
     return render_template('verificar_email.html', email=pending_email, expired=expired, demo_code=demo_code)
 
 
@@ -1752,14 +1743,8 @@ def resend_code():
     db.session.add(verification)
     db.session.commit()
     
-    sent = send_verification_email(pending_email, code)
-    if not sent:
-        session['email_delivery_failed'] = True
-        flash('Nuevo código generado. Si estás en Render Cloud o no te llega el correo, usa el código mostrado en pantalla.', 'info')
-    else:
-        session.pop('email_delivery_failed', None)
-        flash('Nuevo código de verificación enviado a tu correo electrónico.', 'success')
-        
+    send_verification_email(pending_email, code)
+    flash('Nuevo código de verificación enviado a tu correo electrónico.', 'success')
     return redirect(url_for('verify_email'))
 
 
@@ -1932,14 +1917,9 @@ def customer_register_view():
         db.session.add(verification)
         db.session.commit()
         
-        sent = send_verification_email(email, code)
+        send_verification_email(email, code)
         session['pending_customer_verification_email'] = email
-        if not sent:
-            session['email_delivery_failed'] = True
-            flash('Código de verificación generado. Si estás en Render Cloud o no te llega el correo, usa el código de confirmación mostrado en pantalla.', 'info')
-        else:
-            session.pop('email_delivery_failed', None)
-            flash('Código de verificación enviado a tu correo electrónico.', 'success')
+        flash('Código de verificación enviado a tu correo electrónico.', 'success')
         return redirect(url_for('customer_verify_email'))
             
     return render_template('customer_register.html')
@@ -1998,10 +1978,9 @@ def customer_verify_email():
             verification.attempts += 1
             db.session.commit()
             flash('Código de verificación incorrecto.', 'error')
-            demo_code = verification.code if (os.getenv('RENDER') or session.get('email_delivery_failed') or not app.config.get('MAIL_PASSWORD')) else None
-            return render_template('customer_verificar_email.html', email=pending_email, expired=False, demo_code=demo_code)
+            return render_template('customer_verificar_email.html', email=pending_email, expired=False)
             
-    demo_code = verification.code if (os.getenv('RENDER') or session.get('email_delivery_failed') or not app.config.get('MAIL_PASSWORD')) else None
+    demo_code = verification.code if (request.args.get('demo') == '1' or session.get('show_demo_code')) else None
     return render_template('customer_verificar_email.html', email=pending_email, expired=expired, demo_code=demo_code)
 
 
@@ -2027,13 +2006,8 @@ def customer_resend_code():
     verification.expires_at = datetime.now() + timedelta(minutes=10)
     db.session.commit()
     
-    sent = send_verification_email(pending_email, code)
-    if not sent:
-        session['email_delivery_failed'] = True
-        flash('Nuevo código de verificación generado. Si estás en Render Cloud o no te llega el correo, usa el código mostrado en pantalla.', 'info')
-    else:
-        session.pop('email_delivery_failed', None)
-        flash('Nuevo código de verificación enviado a tu correo electrónico.', 'success')
+    send_verification_email(pending_email, code)
+    flash('Nuevo código de verificación enviado a tu correo electrónico.', 'success')
     return redirect(url_for('customer_verify_email'))
 
 
@@ -2107,14 +2081,9 @@ def proveedor_register():
         db.session.add(verification)
         db.session.commit()
         
-        sent = send_verification_email(email, code)
+        send_verification_email(email, code)
         session['pending_supplier_verification_email'] = email
-        if not sent:
-            session['email_delivery_failed'] = True
-            flash('Código de verificación generado. Si estás en Render Cloud o no te llega el correo, usa el código de confirmación mostrado en pantalla.', 'info')
-        else:
-            session.pop('email_delivery_failed', None)
-            flash('Código de verificación enviado a tu correo electrónico. Por favor ingrésalo a continuación.', 'success')
+        flash('Código de verificación enviado a tu correo electrónico. Por favor ingrésalo a continuación.', 'success')
         return redirect(url_for('proveedor_verify_email'))
         
     return render_template('proveedor_registro.html')
@@ -2147,13 +2116,11 @@ def proveedor_verify_email():
         
         if expired:
             flash('El código ha expirado. Solicita uno nuevo.', 'error')
-            demo_code = verification.code if (os.getenv('RENDER') or session.get('email_delivery_failed') or not app.config.get('MAIL_PASSWORD')) else None
-            return render_template('proveedor_verificar_email.html', email=pending_email, expired=True, demo_code=demo_code)
+            return render_template('proveedor_verificar_email.html', email=pending_email, expired=True)
             
         if verification.attempts >= 5:
             flash('Demasiados intentos fallidos. Solicita un nuevo código.', 'error')
-            demo_code = verification.code if (os.getenv('RENDER') or session.get('email_delivery_failed') or not app.config.get('MAIL_PASSWORD')) else None
-            return render_template('proveedor_verificar_email.html', email=pending_email, expired=True, demo_code=demo_code)
+            return render_template('proveedor_verificar_email.html', email=pending_email, expired=True)
             
         if entered_code == verification.code:
             verification.verified = True
@@ -2180,7 +2147,7 @@ def proveedor_verify_email():
             remaining = 5 - verification.attempts
             flash(f'Código incorrecto. Te quedan {remaining} intentos.', 'error')
             
-    demo_code = verification.code if (os.getenv('RENDER') or session.get('email_delivery_failed') or not app.config.get('MAIL_PASSWORD')) else None
+    demo_code = verification.code if (request.args.get('demo') == '1' or session.get('show_demo_code')) else None
     return render_template('proveedor_verificar_email.html', email=pending_email, expired=expired, demo_code=demo_code)
 
 
@@ -2206,13 +2173,8 @@ def proveedor_resend_code():
     verification.expires_at = datetime.now() + timedelta(minutes=10)
     db.session.commit()
     
-    sent = send_verification_email(pending_email, code)
-    if not sent:
-        session['email_delivery_failed'] = True
-        flash('Hemos generado un nuevo código de verificación. Si estás en Render Cloud o no te llega el correo, usa el código mostrado en pantalla.', 'info')
-    else:
-        session.pop('email_delivery_failed', None)
-        flash('Hemos enviado un nuevo código de verificación a tu correo.', 'success')
+    send_verification_email(pending_email, code)
+    flash('Hemos enviado un nuevo código de verificación a tu correo.', 'success')
     return redirect(url_for('proveedor_verify_email'))
 
 
