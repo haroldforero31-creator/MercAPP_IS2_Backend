@@ -1525,6 +1525,16 @@ def validate_price(price_str):
 @app.route('/')
 @app.route('/landing')
 def index():
+    is_desktop = (
+        getattr(sys, 'frozen', False)
+        or os.getenv('MERCAPP_DESKTOP_MODE', 'False').lower() in ('1', 'true', 'yes')
+        or (request.args.get('mode') == 'admin')
+        or (request.args.get('desktop') == '1')
+    )
+    if is_desktop:
+        if current_user.is_authenticated:
+            return redirect(url_for('pos'))
+        return redirect(url_for('register'))
     return render_template('landing.html')
 
 @app.route('/descargar-pos')
@@ -2423,9 +2433,13 @@ def proveedor_registrar_entrega(store_id):
     
     if request.method == 'POST':
         delivery_date_str = request.form.get('delivery_date')
-        raw_amount = str(request.form.get('total_amount', '0')).replace('.', '').replace(',', '').replace('$', '').strip()
+        raw_amount_input = str(request.form.get('total_amount', '0')).strip()
+        if '-' in raw_amount_input or '.' in raw_amount_input or ',' in raw_amount_input or 'e' in raw_amount_input.lower():
+            flash('El costo del pedido debe ser un número entero en pesos colombianos sin puntos, comas ni valores negativos.', 'error')
+            return render_template('proveedor_entrega.html', store=store, active_session=active_session, today_str=datetime.now().strftime('%Y-%m-%d'))
+        raw_amount = raw_amount_input.replace('$', '').strip()
         try:
-            total_amount = int(float(raw_amount or 0))
+            total_amount = int(raw_amount or 0)
         except (ValueError, TypeError):
             total_amount = 0
 
@@ -4474,9 +4488,18 @@ def session_open():
         return redirect(url_for('pos'))
         
     if request.method == 'POST':
-        base_amount = request.form.get('base_amount', '0')
+        base_amount_raw = str(request.form.get('base_amount', '0')).strip()
+        if '-' in base_amount_raw or '.' in base_amount_raw or ',' in base_amount_raw or 'e' in base_amount_raw.lower():
+            flash('La base de caja debe ser un número entero positivo sin puntos, comas ni valores negativos.', 'error')
+            return render_template('caja_apertura.html')
         try:
-            base = int(base_amount)
+            base = int(base_amount_raw)
+            if base < 0:
+                flash('El monto base no puede ser negativo.', 'error')
+                return render_template('caja_apertura.html')
+            if base > 100000000:
+                flash('El monto base no puede superar los $100.000.000 COP.', 'error')
+                return render_template('caja_apertura.html')
             new_sess = CashSession(
                 store_id=current_user.store_id,
                 user_id=get_effective_user_id(),
@@ -4487,8 +4510,8 @@ def session_open():
             db.session.commit()
             log_audit('CASH_SESSION_OPEN', f'Caja abierta con base de {format_cop(base)}', current_user.id)
             return redirect(url_for('pos'))
-        except ValueError:
-            flash('Monto base inválido', 'error')
+        except (ValueError, TypeError):
+            flash('Monto base inválido. Ingresa un número entero en pesos colombianos.', 'error')
             
     return render_template('caja_apertura.html')
 
@@ -4530,9 +4553,18 @@ def session_close():
     expected_cash = active_session.base_amount + cash - supplier_cash_out
     
     if request.method == 'POST':
-        actual = request.form.get('actual_cash', '0')
+        actual_raw = str(request.form.get('actual_cash', '0')).strip()
+        if '-' in actual_raw or '.' in actual_raw or ',' in actual_raw or 'e' in actual_raw.lower():
+            flash('El dinero físico contado debe ser un número entero positivo sin puntos, comas ni valores negativos.', 'error')
+            return redirect(url_for('session_close', session_id=active_session.id if active_session else None))
         try:
-            actual = int(actual)
+            actual = int(actual_raw)
+            if actual < 0:
+                flash('El dinero contado no puede ser negativo.', 'error')
+                return redirect(url_for('session_close', session_id=active_session.id if active_session else None))
+            if actual > 500000000:
+                flash('El dinero contado supera el límite permitido ($500.000.000 COP).', 'error')
+                return redirect(url_for('session_close', session_id=active_session.id if active_session else None))
             active_session.cash_sales = cash
             active_session.card_sales = card
             active_session.transfer_sales = transfer
