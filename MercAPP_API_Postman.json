@@ -1,0 +1,513 @@
+{
+	"info": {
+		"_postman_id": "mercapp-api-collection-2026",
+		"name": "MercAPP API - Sustentación IS2",
+		"description": "Colección oficial de la API REST de MercAPP.\n\n**Criterios demostrados:**\n- C. Seguridad: Hashing de contraseñas con Werkzeug (PBKDF2-SHA256)\n- D. JWT + CORS: Autenticación Bearer Token, CORS restringido\n- E. Estructura y Documentación de la API\n\n**Base URL local:** http://localhost:5000\n**Base URL producción:** https://mercapp-deploy.onrender.com",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "https://mercapp-deploy.onrender.com",
+			"type": "string"
+		},
+		{
+			"key": "jwt_token",
+			"value": "",
+			"type": "string"
+		}
+	],
+	"item": [
+		{
+			"name": "AUTH - Autenticación JWT",
+			"description": "Endpoints de autenticación y emisión de tokens JWT (Criterio D).",
+			"item": [
+				{
+					"name": "1. Obtener Token JWT (Login)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"var jsonData = pm.response.json();",
+									"if (jsonData.success && jsonData.token) {",
+									"    pm.collectionVariables.set('jwt_token', jsonData.token);",
+									"    pm.test('Token JWT obtenido correctamente', function() {",
+									"        pm.expect(jsonData.token).to.be.a('string');",
+									"        pm.expect(jsonData.token.split('.')).to.have.lengthOf(3);",
+									"    });",
+									"    pm.test('Usuario devuelto con datos correctos', function() {",
+									"        pm.expect(jsonData.user).to.have.property('id');",
+									"        pm.expect(jsonData.user).to.have.property('email');",
+									"        pm.expect(jsonData.user).to.have.property('is_admin');",
+									"    });",
+									"    pm.test('Token expira en 12 horas', function() {",
+									"        pm.expect(jsonData.expires_in).to.eql(43200);",
+									"    });",
+									"}",
+									"pm.test('Status 200', function() { pm.response.to.have.status(200); });"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"admin@mercapp.com\",\n    \"password\": \"admin123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/auth/token",
+							"host": ["{{base_url}}"],
+							"path": ["api", "auth", "token"]
+						},
+						"description": "**POST /api/auth/token**\n\nEmite un JWT válido por 12 horas.\n\n**Seguridad demostrada:**\n- Contraseña verificada con `check_password_hash()` (PBKDF2-SHA256)\n- Rate limiting: máximo 5 intentos por minuto\n- Bloqueo automático después de 5 intentos fallidos\n- Token JWT firmado con HS256\n\n**Request Body:**\n```json\n{\n    \"email\": \"admin@mercapp.com\",\n    \"password\": \"admin123\"\n}\n```\n\n**Response 200:**\n```json\n{\n    \"success\": true,\n    \"token\": \"eyJhbGci...\",\n    \"expires_in\": 43200,\n    \"user\": {\n        \"id\": 1,\n        \"name\": \"Admin\",\n        \"email\": \"admin@mercapp.com\",\n        \"is_admin\": true,\n        \"store_id\": 1\n    }\n}\n```"
+					}
+				},
+				{
+					"name": "2. Acceso SIN Token (debe fallar 401)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Acceso denegado sin token - 401', function() {",
+									"    pm.response.to.have.status(401);",
+									"});",
+									"pm.test('Mensaje de error claro', function() {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData.success).to.be.false;",
+									"    pm.expect(jsonData.error).to.include('Autenticación');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/reports/sales",
+							"host": ["{{base_url}}"],
+							"path": ["api", "reports", "sales"]
+						},
+						"description": "**GET /api/reports/sales** (SIN Authorization header)\n\nDemuestra que los endpoints protegidos rechazan peticiones sin token JWT con HTTP 401."
+					}
+				},
+				{
+					"name": "3. Acceso CON Token JWT válido",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Acceso autorizado con JWT - 200', function() {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"pm.test('Respuesta contiene datos', function() {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData).to.have.property('success');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{jwt_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/api/reports/sales",
+							"host": ["{{base_url}}"],
+							"path": ["api", "reports", "sales"]
+						},
+						"description": "**GET /api/reports/sales** (CON Bearer Token)\n\nDemuestra que el mismo endpoint funciona correctamente cuando se envía el JWT obtenido en el paso 1."
+					}
+				},
+				{
+					"name": "4. Token Expirado/Inválido (debe fallar 401)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Token inválido rechazado - 401', function() {",
+									"    pm.response.to.have.status(401);",
+									"});",
+									"pm.test('Error indica token inválido', function() {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData.error).to.include('inválido');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.INVALIDO.firma_falsa" }
+						],
+						"url": {
+							"raw": "{{base_url}}/api/reports/sales",
+							"host": ["{{base_url}}"],
+							"path": ["api", "reports", "sales"]
+						},
+						"description": "Demuestra que un token JWT manipulado o inválido es rechazado con 401."
+					}
+				}
+			]
+		},
+		{
+			"name": "PRODUCTS - Productos",
+			"description": "Endpoints de consulta de productos (requieren JWT).",
+			"item": [
+				{
+					"name": "Buscar Producto (Smart Search)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200', function() { pm.response.to.have.status(200); });",
+									"pm.test('Respuesta es array o tiene productos', function() {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData).to.be.an('object');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{jwt_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/api/product/smart-search?q=arroz",
+							"host": ["{{base_url}}"],
+							"path": ["api", "product", "smart-search"],
+							"query": [{ "key": "q", "value": "arroz" }]
+						},
+						"description": "**GET /api/product/smart-search?q={query}**\n\nBúsqueda inteligente de productos por nombre, código de barras o PLU."
+					}
+				},
+				{
+					"name": "Buscar por Código de Barras",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200', function() { pm.response.to.have.status(200); });"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{jwt_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/api/product/search?q=7701234567890",
+							"host": ["{{base_url}}"],
+							"path": ["api", "product", "search"],
+							"query": [{ "key": "q", "value": "7701234567890" }]
+						},
+						"description": "**GET /api/product/search?q={barcode}**\n\nBúsqueda de producto por código de barras EAN-13."
+					}
+				},
+				{
+					"name": "Productos por Categoría",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200', function() { pm.response.to.have.status(200); });"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{jwt_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/api/category/1/products",
+							"host": ["{{base_url}}"],
+							"path": ["api", "category", "1", "products"]
+						},
+						"description": "**GET /api/category/{id}/products**\n\nLista todos los productos de una categoría."
+					}
+				}
+			]
+		},
+		{
+			"name": "SALES - Ventas",
+			"description": "Endpoints de registro de ventas.",
+			"item": [
+				{
+					"name": "Registrar Venta",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200', function() { pm.response.to.have.status(200); });",
+									"pm.test('Venta procesada', function() {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData.success).to.be.true;",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{jwt_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"items\": [\n        {\n            \"product_id\": 1,\n            \"quantity\": 2,\n            \"unit_price\": 3500\n        }\n    ],\n    \"payment\": {\n        \"method\": \"efectivo\",\n        \"amount_given\": 10000\n    }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/sale",
+							"host": ["{{base_url}}"],
+							"path": ["api", "sale"]
+						},
+						"description": "**POST /api/sale**\n\nRegistra una venta completa con items y método de pago.\n\n**Moneda:** Pesos colombianos (COP) - Solo enteros."
+					}
+				}
+			]
+		},
+		{
+			"name": "ORDERS - Pedidos Proveedor",
+			"description": "Endpoints de gestión de pedidos a proveedores.",
+			"item": [
+				{
+					"name": "Crear Pedido a Proveedor",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200 o 201', function() {",
+									"    pm.expect(pm.response.code).to.be.oneOf([200, 201]);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{jwt_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"supplier_id\": 1,\n    \"items\": [\n        {\n            \"product_id\": 1,\n            \"quantity\": 10,\n            \"unit_cost\": 2500\n        }\n    ],\n    \"notes\": \"Pedido de prueba API\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/order",
+							"host": ["{{base_url}}"],
+							"path": ["api", "order"]
+						},
+						"description": "**POST /api/order**\n\nCrea un pedido a un proveedor."
+					}
+				},
+				{
+					"name": "Consultar Pedido",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200', function() { pm.response.to.have.status(200); });"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{jwt_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/api/order/1",
+							"host": ["{{base_url}}"],
+							"path": ["api", "order", "1"]
+						},
+						"description": "**GET /api/order/{id}**\n\nConsulta los detalles de un pedido a proveedor."
+					}
+				}
+			]
+		},
+		{
+			"name": "REPORTS - Reportes",
+			"description": "Endpoints de reportes y procedimientos almacenados.",
+			"item": [
+				{
+					"name": "Reporte de Ventas",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200', function() { pm.response.to.have.status(200); });",
+									"pm.test('Contiene datos de ventas', function() {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData).to.have.property('success');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{jwt_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/api/reports/sales",
+							"host": ["{{base_url}}"],
+							"path": ["api", "reports", "sales"]
+						},
+						"description": "**GET /api/reports/sales**\n\nReporte consolidado de ventas del día."
+					}
+				},
+				{
+					"name": "Reporte de Inventario",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200', function() { pm.response.to.have.status(200); });"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{jwt_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/api/reports/inventory",
+							"host": ["{{base_url}}"],
+							"path": ["api", "reports", "inventory"]
+						},
+						"description": "**GET /api/reports/inventory**\n\nReporte del estado actual del inventario."
+					}
+				},
+				{
+					"name": "SP - Reporte Ventas Diarias",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200', function() { pm.response.to.have.status(200); });"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{jwt_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/api/routines/sp-reporte-ventas-diarias",
+							"host": ["{{base_url}}"],
+							"path": ["api", "routines", "sp-reporte-ventas-diarias"]
+						},
+						"description": "**GET /api/routines/sp-reporte-ventas-diarias**\n\nEjecuta el procedimiento almacenado de reporte de ventas diarias."
+					}
+				},
+				{
+					"name": "SP - Reorden de Stock",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200', function() { pm.response.to.have.status(200); });"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{jwt_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/api/routines/sp-reorden-stock",
+							"host": ["{{base_url}}"],
+							"path": ["api", "routines", "sp-reorden-stock"]
+						},
+						"description": "**GET /api/routines/sp-reorden-stock**\n\nEjecuta el procedimiento almacenado de sugerencia de reorden de stock."
+					}
+				}
+			]
+		},
+		{
+			"name": "HEALTH - Estado del Servidor",
+			"description": "Verificación de salud del servicio.",
+			"item": [
+				{
+					"name": "Health Check (público)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Servidor activo - 200', function() { pm.response.to.have.status(200); });",
+									"pm.test('Respuesta indica servicio saludable', function() {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData.status).to.eql('healthy');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/health",
+							"host": ["{{base_url}}"],
+							"path": ["api", "health"]
+						},
+						"description": "**GET /api/health**\n\nEndpoint público que verifica el estado del servidor. No requiere autenticación."
+					}
+				}
+			]
+		}
+	]
+}
