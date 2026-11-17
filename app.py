@@ -1082,27 +1082,23 @@ def check_internet_connection(timeout=2.0):
 
 
 def process_email_queue():
-    """Procesa los correos pendientes en la cola local si existe conexión a internet."""
+    """Procesa los correos pendientes en la cola usando send_email_unified (compatible con Brevo HTTP API y SMTP)."""
     with app.app_context():
         try:
-            if not check_internet_connection():
-                return 0
             pending_items = EmailQueue.query.filter_by(status='pending').order_by(EmailQueue.created_at.asc()).all()
             if not pending_items:
                 return 0
             sent_count = 0
             for item in pending_items:
                 try:
-                    msg = Message(
-                        subject=item.subject,
-                        recipients=[item.recipient]
-                    )
-                    msg.html = item.html_body
-                    mail.send(msg)
-                    item.status = 'sent'
-                    item.sent_at = datetime.now()
-                    item.last_error = None
-                    sent_count += 1
+                    success = send_email_unified(item.recipient, item.subject, item.html_body)
+                    if success:
+                        item.status = 'sent'
+                        item.sent_at = datetime.now()
+                        item.last_error = None
+                        sent_count += 1
+                    else:
+                        raise Exception("send_email_unified returned False")
                 except Exception as e:
                     item.attempts = (item.attempts or 0) + 1
                     item.last_error = str(e)
