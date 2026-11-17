@@ -940,27 +940,27 @@ def send_supplier_payment_confirmation_email(supplier, order, delivery, store, a
     if delivery and delivery.payment_method == 'mixto':
         cash_row = f"""
         <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-            <span style="color: #94A3B8;">💵 Efectivo en Caja:</span>
+            <span style="color: #94A3B8;"> Efectivo en Caja:</span>
             <span style="color: #4ADE80; font-weight: 700;">{format_cop(amount_cash)}</span>
         </div>
         """
         transfer_row = f"""
         <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-            <span style="color: #94A3B8;">📲 Transferencia Bancaria:</span>
+            <span style="color: #94A3B8;"> Transferencia Bancaria:</span>
             <span style="color: #60A5FA; font-weight: 700;">{format_cop(amount_transfer)}</span>
         </div>
         """
     elif delivery and delivery.payment_method == 'efectivo':
         cash_row = f"""
         <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-            <span style="color: #94A3B8;">💵 Pago en Efectivo:</span>
+            <span style="color: #94A3B8;"> Pago en Efectivo:</span>
             <span style="color: #4ADE80; font-weight: 700;">{total_cop}</span>
         </div>
         """
     elif delivery and delivery.payment_method == 'transferencia':
         transfer_row = f"""
         <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-            <span style="color: #94A3B8;">📲 Transferencia Bancaria:</span>
+            <span style="color: #94A3B8;"> Transferencia Bancaria:</span>
             <span style="color: #60A5FA; font-weight: 700;">{total_cop}</span>
         </div>
         """
@@ -1026,12 +1026,12 @@ def send_supplier_payment_confirmation_email(supplier, order, delivery, store, a
                 </div>
 
                 <div style="background: rgba(43, 160, 71, 0.08); border-left: 4px solid #43a047; padding: 14px 16px; border-radius: 6px; font-size: 0.82rem; color: #a5d6a7; line-height: 1.45; margin-bottom: 24px;">
-                    🔒 <strong>Soporte Oficial Contable:</strong> Este registro queda asentado formalmente en el libro contable de egresos de la tienda y en tu historial de despachos.
+                     <strong>Soporte Oficial Contable:</strong> Este registro queda asentado formalmente en el libro contable de egresos de la tienda y en tu historial de despachos.
                 </div>
 
                 <div style="text-align: center;">
                     <a href="https://mercapp-deploy.onrender.com/proveedor/pedidos" style="display: inline-block; background-color: #2e7d32; color: #ffffff; text-decoration: none; padding: 12px 28px; border-radius: 8px; font-weight: 700; font-size: 0.95rem;">
-                        Ver Mis Pedidos en el Portal ➔
+                        Ver Mis Pedidos en el Portal →
                     </a>
                 </div>
             </div>
@@ -1210,7 +1210,7 @@ def generate_closing_report_html(active_session, store, admin, stats):
             <!-- Desglose de Medios de Pago -->
             <div style="margin-bottom: 20px;">
                 <h3 style="font-size: 0.95rem; color: #FFA726; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px;">
-                    💳 Desglose por Métodos de Pago
+                     Desglose por Métodos de Pago
                 </h3>
                 <table style="width: 100%; border-collapse: collapse; background: #151B28; border-radius: 10px; overflow: hidden; border: 1px solid #232A3B;">
                     <thead>
@@ -1221,19 +1221,19 @@ def generate_closing_report_html(active_session, store, admin, stats):
                     </thead>
                     <tbody style="font-size: 0.9rem;">
                         <tr style="border-bottom: 1px solid #1F2739;">
-                            <td style="padding: 10px 14px; color: #FFFFFF;">💵 Ventas en Efectivo</td>
+                            <td style="padding: 10px 14px; color: #FFFFFF;"> Ventas en Efectivo</td>
                             <td style="padding: 10px 14px; text-align: right; color: #FFFFFF; font-weight: 600;">{cash_sales_cop}</td>
                         </tr>
                         <tr style="border-bottom: 1px solid #1F2739;">
-                            <td style="padding: 10px 14px; color: #FFFFFF;">💳 Ventas con Tarjeta (Datáfono)</td>
+                            <td style="padding: 10px 14px; color: #FFFFFF;"> Ventas con Tarjeta (Datáfono)</td>
                             <td style="padding: 10px 14px; text-align: right; color: #FFFFFF; font-weight: 600;">{card_sales_cop}</td>
                         </tr>
                         <tr style="border-bottom: 1px solid #1F2739;">
-                            <td style="padding: 10px 14px; color: #FFFFFF;">📲 Transferencias (Nequi / Daviplata / Bancos)</td>
+                            <td style="padding: 10px 14px; color: #FFFFFF;"> Transferencias (Nequi / Daviplata / Bancos)</td>
                             <td style="padding: 10px 14px; text-align: right; color: #FFFFFF; font-weight: 600;">{transfer_sales_cop}</td>
                         </tr>
                         <tr style="border-bottom: 1px solid #1F2739;">
-                            <td style="padding: 10px 14px; color: #FFFFFF;">📝 Ventas Fiadas (Crédito a Clientes)</td>
+                            <td style="padding: 10px 14px; color: #FFFFFF;"> Ventas Fiadas (Crédito a Clientes)</td>
                             <td style="padding: 10px 14px; text-align: right; color: #FFA726; font-weight: 600;">{credit_sales_cop}</td>
                         </tr>
                         <tr style="background: rgba(255,167,38,0.06); font-weight: bold; font-size: 1rem;">
@@ -1247,7 +1247,7 @@ def generate_closing_report_html(active_session, store, admin, stats):
             <!-- Auditoría de Arqueo Físico de Caja -->
             <div style="background: #151B28; border: 1px solid #232A3B; border-radius: 12px; padding: 18px; margin-bottom: 20px;">
                 <h3 style="font-size: 0.95rem; color: #81C784; text-transform: uppercase; letter-spacing: 1px; margin-top: 0; margin-bottom: 12px;">
-                    💰 Arqueo y Conciliación Física de Efectivo
+                     Arqueo y Conciliación Física de Efectivo
                 </h3>
                 <table style="width: 100%; font-size: 0.9rem; line-height: 1.8;">
                     <tr>
@@ -1307,7 +1307,7 @@ def queue_cash_closing_email(active_session, stats):
         store_name = store.name if store else "MercAPP"
         
         date_str = active_session.closed_at.strftime('%d/%m/%Y') if active_session.closed_at else datetime.now().strftime('%d/%m/%Y')
-        subject = f"📊 Reporte de Cierre de Caja & Ventas - {store_name} ({date_str})"
+        subject = f"Reporte de Cierre de Caja & Ventas - {store_name} ({date_str})"
         
         html_body = generate_closing_report_html(active_session, store, admin_user, stats)
         
@@ -4706,7 +4706,7 @@ def session_closing_report(session_id):
         <body>
             <div class="action-bar">
                 <a href="{{ url_for('session_history') }}" class="btn btn-back">← Volver a Historial</a>
-                <button onclick="window.print()" class="btn btn-print">🖨️ Imprimir / Guardar PDF</button>
+                <button onclick="window.print()" class="btn btn-print">Imprimir / Guardar PDF</button>
             </div>
             {{ body|safe }}
         </body>
@@ -4751,7 +4751,7 @@ def session_closing_report(session_id):
     <body>
         <div class="action-bar">
             <a href="{{ url_for('session_history') }}" class="btn btn-back">← Volver a Historial</a>
-            <button onclick="window.print()" class="btn btn-print">🖨️ Imprimir / Guardar PDF</button>
+            <button onclick="window.print()" class="btn btn-print">Imprimir / Guardar PDF</button>
         </div>
         {{ body|safe }}
     </body>
