@@ -467,15 +467,40 @@ def generate_receipt_number(store_id=None):
     return candidate
 
 
+_BREVO_VERIFIED_SENDER = None
+
+
 def send_via_http_api(to_email, subject, html_content):
     """
     Envía correo a través de HTTPS (puerto 443) para eludir el bloqueo de puertos SMTP (587/465)
     en plataformas cloud como Render Free Tier. Soporta Brevo y Resend.
     """
+    global _BREVO_VERIFIED_SENDER
     brevo_key = os.getenv('BREVO_API_KEY')
     if brevo_key:
         try:
-            sender_email = os.getenv('BREVO_SENDER_EMAIL', os.getenv('MAIL_USERNAME', 'mercapp.services@gmail.com'))
+            sender_email = os.getenv('BREVO_SENDER_EMAIL', '').strip()
+            if not sender_email:
+                if not _BREVO_VERIFIED_SENDER:
+                    try:
+                        s_req = urllib.request.Request(
+                            'https://api.brevo.com/v3/senders',
+                            headers={'api-key': brevo_key.strip(), 'accept': 'application/json'}
+                        )
+                        with urllib.request.urlopen(s_req, timeout=5) as s_resp:
+                            s_data = json.loads(s_resp.read().decode('utf-8'))
+                            active_senders = [
+                                s['email'] for s in s_data.get('senders', [])
+                                if s.get('active') and s.get('email')
+                            ]
+                            if active_senders:
+                                _BREVO_VERIFIED_SENDER = active_senders[0]
+                                print(f"[BREVO AUTO-SENDER] Remitente verificado detectado dinámicamente: {_BREVO_VERIFIED_SENDER}")
+                    except Exception as e_s:
+                        print(f"[BREVO AUTO-SENDER WARNING] No se pudo consultar remitente automático: {e_s}")
+
+                sender_email = _BREVO_VERIFIED_SENDER or 'haroldforero31@gmail.com'
+
             sender_name = os.getenv('MAIL_SENDER_NAME', 'MercAPP')
             url = "https://api.brevo.com/v3/smtp/email"
             headers = {
@@ -492,7 +517,7 @@ def send_via_http_api(to_email, subject, html_content):
             req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
             with urllib.request.urlopen(req, timeout=10) as resp:
                 if resp.status in (200, 201):
-                    print(f"[BREVO SUCCESS] Correo entregado exitosamente por HTTPS a {to_email}")
+                    print(f"[BREVO SUCCESS] Correo entregado exitosamente por HTTPS a {to_email} (remitente: {sender_email})")
                     return True
         except Exception as e:
             print(f"[BREVO ERROR] Error enviando por Brevo API a {to_email}: {e}")
