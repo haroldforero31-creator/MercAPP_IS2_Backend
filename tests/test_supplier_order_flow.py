@@ -393,3 +393,67 @@ def test_supplier_views_mis_pedidos_and_statuses(test_setup):
         assert res_final.status_code == 200
         assert b"Confirmado & Pagado" in res_final.data
         assert b"Soporte oficial de liquidaci\xc3\xb3n y pago enviado al correo" in res_final.data
+
+
+def test_desktop_mode_redirect_and_strict_currency_validation(test_setup):
+    """Test desktop mode bypassing landing page and strict rejection of negative/decimal values."""
+    app.config['TESTING'] = True
+    app.config['WTF_CSRF_ENABLED'] = False
+    admin_id = test_setup['admin_id']
+    store_id = test_setup['store_id']
+
+    # 1. Desktop mode redirect check (unauthenticated -> /register)
+    with app.test_client() as client:
+        # Without desktop mode, / renders landing
+        web_resp = client.get('/')
+        assert web_resp.status_code == 200
+        assert b"Vende m\xc3\xa1s" in web_resp.data
+
+        # With desktop mode (?mode=admin or MERCAPP_DESKTOP_MODE)
+        desktop_resp = client.get('/?mode=admin')
+        assert desktop_resp.status_code == 302
+        assert '/register' in desktop_resp.headers['Location']
+
+        # Authenticated in desktop mode -> redirects to /pos
+        with client.session_transaction() as sess:
+            sess['_user_id'] = str(admin_id)
+            sess['_fresh'] = True
+        auth_desktop_resp = client.get('/?mode=admin')
+        assert auth_desktop_resp.status_code == 302
+        assert '/pos' in auth_desktop_resp.headers['Location']
+
+    # 2. Rejection of negative / decimal in session_open
+    with app.app_context():
+        CashSession.query.filter(CashSession.store_id == store_id, CashSession.user_id == admin_id).delete()
+        db.session.commit()
+
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess['_user_id'] = str(admin_id)
+            sess['_fresh'] = True
+
+        # Negative base amount
+        neg_base = client.post('/session/open', data={'base_amount': '-50000'}, follow_redirects=True)
+        assert b"valores negativos" in neg_base.data or b"negativo" in neg_base.data
+
+        # Decimal base amount
+        dec_base = client.post('/session/open', data={'base_amount': '50000.50'}, follow_redirects=True)
+        assert b"sin puntos" in dec_base.data or b"decimales" in dec_base.data
+
+    # 3. Rejection of negative / decimal in session_close
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess['_user_id'] = str(admin_id)
+            sess['_fresh'] = True
+
+        # Open valid session first
+        client.post('/session/open', data={'base_amount': '100000'}, follow_redirects=True)
+
+        # Attempt close with negative actual cash
+        neg_close = client.post('/session/close', data={'actual_cash': '-20000'}, follow_redirects=True)
+        assert b"no puede ser negativo" in neg_close.data or b"sin puntos" in neg_close.data
+
+        # Attempt close with decimal actual cash
+        dec_close = client.post('/session/close', data={'actual_cash': '100000.99'}, follow_redirects=True)
+        assert b"sin puntos" in dec_close.data or b"decimales" in dec_close.data
+
