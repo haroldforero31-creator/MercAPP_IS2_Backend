@@ -6628,6 +6628,328 @@ def api_sync_status():
     })
 
 
+@app.route('/api/docs')
+def api_docs():
+    """Documentación interactiva de la API REST - Criterios C, D, E (Sustentación IS2)."""
+    return '''<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MercAPP API - Documentacion</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#0f1117;color:#e2e8f0;line-height:1.6}
+.header{background:linear-gradient(135deg,#1e293b,#0f172a);padding:30px 40px;border-bottom:2px solid #f59e0b}
+.header h1{font-size:1.8rem;color:#fff}.header p{color:#94a3b8;margin-top:4px}
+.badge{display:inline-block;padding:3px 10px;border-radius:12px;font-size:.75rem;font-weight:600;margin-left:8px}
+.badge-green{background:#065f46;color:#6ee7b7}.badge-blue{background:#1e3a5f;color:#60a5fa}
+.container{max-width:1100px;margin:0 auto;padding:20px 40px}
+.section{margin:24px 0;background:#1e293b;border-radius:12px;overflow:hidden;border:1px solid #334155}
+.section-title{padding:16px 20px;font-size:1.1rem;font-weight:700;cursor:pointer;display:flex;justify-content:space-between;align-items:center;background:#1e293b;border-bottom:1px solid #334155}
+.section-title:hover{background:#263548}
+.section-content{padding:0}
+.endpoint{padding:14px 20px;border-bottom:1px solid #1a2332;display:flex;align-items:center;gap:14px;cursor:pointer;transition:background .15s}
+.endpoint:hover{background:#263548}
+.method{padding:3px 10px;border-radius:6px;font-weight:700;font-size:.75rem;min-width:52px;text-align:center;font-family:monospace}
+.method-GET{background:#065f46;color:#6ee7b7}.method-POST{background:#1e3a5f;color:#60a5fa}
+.path{font-family:monospace;color:#f1f5f9;font-size:.9rem}
+.desc{color:#94a3b8;font-size:.82rem;margin-left:auto}
+.panel{display:none;padding:20px;background:#0f172a;border-top:1px solid #334155}
+.panel.active{display:block}
+.panel h4{color:#f59e0b;margin-bottom:10px;font-size:.9rem}
+pre{background:#020617;padding:14px;border-radius:8px;overflow-x:auto;font-size:.82rem;color:#e2e8f0;border:1px solid #1e293b;margin-bottom:14px}
+.btn{padding:8px 20px;border:none;border-radius:8px;font-weight:600;cursor:pointer;font-size:.85rem}
+.btn-send{background:#f59e0b;color:#0f172a}.btn-send:hover{background:#d97706}
+.response-box{margin-top:14px;padding:14px;background:#020617;border-radius:8px;border:1px solid #1e293b;font-family:monospace;font-size:.82rem;white-space:pre-wrap;max-height:300px;overflow-y:auto;display:none}
+.status-ok{border-left:3px solid #22c55e}.status-err{border-left:3px solid #ef4444}
+.info-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;margin:20px 0}
+.info-card{background:#1e293b;border-radius:12px;padding:20px;border:1px solid #334155}
+.info-card h3{color:#f59e0b;font-size:.95rem;margin-bottom:10px}
+.info-card code{background:#020617;padding:2px 6px;border-radius:4px;font-size:.82rem;color:#60a5fa}
+.info-card ul{list-style:none;padding:0}.info-card li{padding:4px 0;color:#cbd5e1;font-size:.85rem}
+.info-card li::before{content:">";color:#f59e0b;font-weight:700;margin-right:8px}
+.token-area{width:100%;padding:10px;background:#020617;border:1px solid #334155;border-radius:8px;color:#6ee7b7;font-family:monospace;font-size:.8rem;margin:8px 0;resize:none}
+.flex-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.input-sm{padding:7px 12px;background:#020617;border:1px solid #334155;border-radius:6px;color:#e2e8f0;font-size:.85rem}
+.tab-row{display:flex;gap:0;margin-bottom:14px}.tab-btn{padding:6px 16px;background:#0f172a;border:1px solid #334155;color:#94a3b8;cursor:pointer;font-size:.82rem}
+.tab-btn.active{background:#1e293b;color:#f59e0b;border-bottom-color:#1e293b}
+</style>
+</head>
+<body>
+<div class="header">
+<h1>MercAPP API <span class="badge badge-green">REST</span> <span class="badge badge-blue">JWT</span></h1>
+<p>Documentacion interactiva - Ingenieria de Software II</p>
+</div>
+<div class="container">
+
+<div class="info-grid">
+<div class="info-card">
+<h3>C. Seguridad</h3>
+<ul>
+<li>Hashing: <code>PBKDF2-SHA256</code> (Werkzeug)</li>
+<li>Rate limiting: 5 intentos/minuto en login</li>
+<li>Bloqueo automatico tras 5 fallos</li>
+<li>Secretos en variables de entorno</li>
+<li>Cookies: HttpOnly + SameSite=Lax</li>
+</ul>
+</div>
+<div class="info-card">
+<h3>D. JWT + CORS</h3>
+<ul>
+<li>Token JWT con <code>HS256</code>, expira en 12h</li>
+<li>Header: <code>Authorization: Bearer {token}</code></li>
+<li>CORS restringido a origenes autorizados</li>
+<li>Frontend consume API via Fetch + Bearer</li>
+</ul>
+</div>
+<div class="info-card">
+<h3>E. Arquitectura API</h3>
+<ul>
+<li>50+ endpoints REST organizados por recurso</li>
+<li>Respuestas JSON estandarizadas</li>
+<li>Codigos HTTP semanticos (200, 400, 401, 403)</li>
+<li>Documentacion: esta pagina + Postman collection</li>
+</ul>
+</div>
+</div>
+
+<div style="background:#1e293b;border-radius:12px;padding:20px;border:1px solid #334155;margin-bottom:20px">
+<h3 style="color:#f59e0b;margin-bottom:10px">Token JWT (autenticacion global)</h3>
+<p style="font-size:.85rem;color:#94a3b8;margin-bottom:10px">Primero obtene tu token con el boton de abajo. Se usara automaticamente en todas las peticiones.</p>
+<div class="flex-row">
+<input id="login-email" class="input-sm" placeholder="Email" value="admin@mercapp.com" style="width:220px">
+<input id="login-pass" class="input-sm" type="password" placeholder="Password" value="admin123" style="width:160px">
+<button class="btn btn-send" onclick="doLogin()">Obtener Token</button>
+<span id="login-status" style="font-size:.82rem;color:#94a3b8"></span>
+</div>
+<textarea id="global-token" class="token-area" rows="2" placeholder="El token JWT aparecera aqui..."></textarea>
+</div>
+
+<div class="section">
+<div class="section-title" onclick="toggleSection(this)">AUTH - Autenticacion <span>&#9660;</span></div>
+<div class="section-content">
+<div class="endpoint" onclick="togglePanel('p-auth-token')">
+<span class="method method-POST">POST</span>
+<span class="path">/api/auth/token</span>
+<span class="desc">Obtener JWT (login)</span>
+</div>
+<div id="p-auth-token" class="panel">
+<h4>Request Body</h4>
+<pre>{"email": "admin@mercapp.com", "password": "admin123"}</pre>
+<h4>Respuesta esperada</h4>
+<pre>{"success": true, "token": "eyJhbG...", "expires_in": 43200, "user": {"id": 1, ...}}</pre>
+<button class="btn btn-send" onclick="sendReq('POST','/api/auth/token',JSON.stringify({email:'admin@mercapp.com',password:'admin123'}),'r-auth-token',false)">Enviar</button>
+<div id="r-auth-token" class="response-box"></div>
+</div>
+
+<div class="endpoint" onclick="togglePanel('p-no-auth')">
+<span class="method method-GET">GET</span>
+<span class="path">/api/reports/sales</span>
+<span class="desc">SIN token (debe dar 401)</span>
+</div>
+<div id="p-no-auth" class="panel">
+<h4>Prueba de proteccion</h4>
+<p style="font-size:.85rem;color:#94a3b8;margin-bottom:10px">Esta peticion se envia SIN Authorization header para demostrar que el endpoint esta protegido.</p>
+<button class="btn btn-send" onclick="sendReq('GET','/api/reports/sales',null,'r-no-auth',false)">Enviar SIN Token</button>
+<div id="r-no-auth" class="response-box"></div>
+</div>
+
+<div class="endpoint" onclick="togglePanel('p-with-auth')">
+<span class="method method-GET">GET</span>
+<span class="path">/api/reports/sales</span>
+<span class="desc">CON token (debe dar 200)</span>
+</div>
+<div id="p-with-auth" class="panel">
+<h4>Prueba de acceso autorizado</h4>
+<p style="font-size:.85rem;color:#94a3b8;margin-bottom:10px">Misma peticion pero CON el Bearer Token. Debe retornar 200 con datos.</p>
+<button class="btn btn-send" onclick="sendReq('GET','/api/reports/sales',null,'r-with-auth',true)">Enviar CON Token</button>
+<div id="r-with-auth" class="response-box"></div>
+</div>
+</div>
+</div>
+
+<div class="section">
+<div class="section-title" onclick="toggleSection(this)">PRODUCTS - Productos <span>&#9660;</span></div>
+<div class="section-content">
+<div class="endpoint" onclick="togglePanel('p-search')">
+<span class="method method-GET">GET</span>
+<span class="path">/api/product/smart-search?q=...</span>
+<span class="desc">Busqueda inteligente</span>
+</div>
+<div id="p-search" class="panel">
+<h4>Parametros</h4>
+<div class="flex-row" style="margin-bottom:10px">
+<span style="color:#94a3b8;font-size:.85rem">Buscar:</span>
+<input id="search-q" class="input-sm" value="arroz" style="width:200px">
+<button class="btn btn-send" onclick="sendReq('GET','/api/product/smart-search?q='+encodeURIComponent(document.getElementById(\'search-q\').value),null,'r-search',true)">Buscar</button>
+</div>
+<div id="r-search" class="response-box"></div>
+</div>
+
+<div class="endpoint" onclick="togglePanel('p-cat')">
+<span class="method method-GET">GET</span>
+<span class="path">/api/category/{id}/products</span>
+<span class="desc">Productos por categoria</span>
+</div>
+<div id="p-cat" class="panel">
+<div class="flex-row" style="margin-bottom:10px">
+<span style="color:#94a3b8;font-size:.85rem">ID Categoria:</span>
+<input id="cat-id" class="input-sm" value="1" type="number" style="width:80px">
+<button class="btn btn-send" onclick="sendReq('GET','/api/category/'+document.getElementById('cat-id').value+'/products',null,'r-cat',true)">Consultar</button>
+</div>
+<div id="r-cat" class="response-box"></div>
+</div>
+
+<div class="endpoint" onclick="togglePanel('p-barcode')">
+<span class="method method-GET">GET</span>
+<span class="path">/api/product/search?q={barcode}</span>
+<span class="desc">Buscar por codigo de barras</span>
+</div>
+<div id="p-barcode" class="panel">
+<div class="flex-row" style="margin-bottom:10px">
+<span style="color:#94a3b8;font-size:.85rem">Codigo:</span>
+<input id="barcode-q" class="input-sm" value="7701234567890" style="width:200px">
+<button class="btn btn-send" onclick="sendReq('GET','/api/product/search?q='+document.getElementById('barcode-q').value,null,'r-barcode',true)">Buscar</button>
+</div>
+<div id="r-barcode" class="response-box"></div>
+</div>
+</div>
+</div>
+
+<div class="section">
+<div class="section-title" onclick="toggleSection(this)">REPORTS - Reportes y Procedimientos Almacenados <span>&#9660;</span></div>
+<div class="section-content">
+<div class="endpoint" onclick="togglePanel('p-rsales')">
+<span class="method method-GET">GET</span>
+<span class="path">/api/reports/sales</span>
+<span class="desc">Reporte de ventas del dia</span>
+</div>
+<div id="p-rsales" class="panel">
+<button class="btn btn-send" onclick="sendReq('GET','/api/reports/sales',null,'r-rsales',true)">Consultar</button>
+<div id="r-rsales" class="response-box"></div>
+</div>
+
+<div class="endpoint" onclick="togglePanel('p-rinv')">
+<span class="method method-GET">GET</span>
+<span class="path">/api/reports/inventory</span>
+<span class="desc">Reporte de inventario</span>
+</div>
+<div id="p-rinv" class="panel">
+<button class="btn btn-send" onclick="sendReq('GET','/api/reports/inventory',null,'r-rinv',true)">Consultar</button>
+<div id="r-rinv" class="response-box"></div>
+</div>
+
+<div class="endpoint" onclick="togglePanel('p-spventas')">
+<span class="method method-GET">GET</span>
+<span class="path">/api/routines/sp-reporte-ventas-diarias</span>
+<span class="desc">SP: Reporte ventas diarias</span>
+</div>
+<div id="p-spventas" class="panel">
+<button class="btn btn-send" onclick="sendReq('GET','/api/routines/sp-reporte-ventas-diarias',null,'r-spventas',true)">Ejecutar SP</button>
+<div id="r-spventas" class="response-box"></div>
+</div>
+
+<div class="endpoint" onclick="togglePanel('p-spreorden')">
+<span class="method method-GET">GET</span>
+<span class="path">/api/routines/sp-reorden-stock</span>
+<span class="desc">SP: Sugerencia de reorden</span>
+</div>
+<div id="p-spreorden" class="panel">
+<button class="btn btn-send" onclick="sendReq('GET','/api/routines/sp-reorden-stock',null,'r-spreorden',true)">Ejecutar SP</button>
+<div id="r-spreorden" class="response-box"></div>
+</div>
+</div>
+</div>
+
+<div class="section">
+<div class="section-title" onclick="toggleSection(this)">HEALTH - Estado del Servidor <span>&#9660;</span></div>
+<div class="section-content">
+<div class="endpoint" onclick="togglePanel('p-health')">
+<span class="method method-GET">GET</span>
+<span class="path">/api/health</span>
+<span class="desc">Health check (publico)</span>
+</div>
+<div id="p-health" class="panel">
+<p style="font-size:.85rem;color:#94a3b8;margin-bottom:10px">Endpoint publico - no requiere autenticacion.</p>
+<button class="btn btn-send" onclick="sendReq('GET','/api/health',null,'r-health',false)">Verificar</button>
+<div id="r-health" class="response-box"></div>
+</div>
+</div>
+</div>
+
+</div>
+
+<script>
+let globalToken = '';
+
+function doLogin() {
+    const email = document.getElementById('login-email').value;
+    const pass = document.getElementById('login-pass').value;
+    const status = document.getElementById('login-status');
+    status.textContent = 'Autenticando...';
+    status.style.color = '#f59e0b';
+    fetch('/api/auth/token', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({email, password: pass})
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.success && data.token) {
+            globalToken = data.token;
+            document.getElementById('global-token').value = data.token;
+            status.textContent = 'Token obtenido - Usuario: ' + data.user.name + ' (Admin: ' + data.user.is_admin + ')';
+            status.style.color = '#6ee7b7';
+        } else {
+            status.textContent = 'Error: ' + (data.error || 'Credenciales incorrectas');
+            status.style.color = '#ef4444';
+        }
+    })
+    .catch(e => { status.textContent = 'Error de red: ' + e; status.style.color = '#ef4444'; });
+}
+
+function sendReq(method, path, body, respId, useAuth) {
+    const box = document.getElementById(respId);
+    box.style.display = 'block';
+    box.textContent = 'Enviando...';
+    box.className = 'response-box';
+    const headers = {};
+    if (body) headers['Content-Type'] = 'application/json';
+    if (useAuth && globalToken) headers['Authorization'] = 'Bearer ' + globalToken;
+    const opts = {method, headers};
+    if (body) opts.body = body;
+    const t0 = performance.now();
+    fetch(path, opts)
+    .then(r => {
+        const ms = Math.round(performance.now() - t0);
+        const status = r.status;
+        return r.text().then(text => {
+            let display = 'HTTP ' + status + ' (' + ms + 'ms)';
+            display += '\\nMethod: ' + method + (useAuth ? ' [CON Bearer Token]' : ' [SIN autenticacion]');
+            display += '\\nPath: ' + path + '\\n\\n';
+            try { display += JSON.stringify(JSON.parse(text), null, 2); } catch(e) { display += text; }
+            box.textContent = display;
+            box.className = 'response-box ' + (status >= 200 && status < 300 ? 'status-ok' : 'status-err');
+        });
+    })
+    .catch(e => { box.textContent = 'Error: ' + e; box.className = 'response-box status-err'; });
+}
+
+function togglePanel(id) {
+    const el = document.getElementById(id);
+    el.classList.toggle('active');
+}
+
+function toggleSection(el) {
+    const content = el.nextElementSibling;
+    content.style.display = content.style.display === 'none' ? '' : 'none';
+}
+</script>
+</body>
+</html>'''
+
+
 @app.route('/api/health', methods=['GET'])
 def api_health():
     """Enterprise health check endpoint for monitoring and load testing."""
