@@ -1704,6 +1704,22 @@ def api_auth_token():
 # Eximir programáticamente de CSRF al endpoint REST JWT sin exponer decorador AST a SonarCloud
 csrf.exempt(api_auth_token)
 
+@app.route('/api/auth/profile', methods=['GET'])
+@login_required
+def api_auth_profile():
+    """Retorna los datos del usuario autenticado (requiere sesión o JWT)."""
+    return jsonify({
+        'success': True,
+        'message': 'Autenticación exitosa mediante JWT Bearer Token.',
+        'user': {
+            'id': current_user.id,
+            'name': current_user.name,
+            'email': current_user.email,
+            'is_admin': getattr(current_user, 'is_admin', False),
+            'store_id': getattr(current_user, 'store_id', None)
+        }
+    })
+
 
 @app.route('/login', methods=['GET', 'POST'])
 @limiter.limit(max_requests=5, window_seconds=60, key='web_admin_login')
@@ -6744,14 +6760,14 @@ pre{background:#020617;padding:14px;border-radius:8px;overflow-x:auto;font-size:
 
 <div style="background:#1e293b;border-radius:12px;padding:20px;border:1px solid #334155;margin-bottom:20px">
 <h3 style="color:#f59e0b;margin-bottom:10px">Token JWT (autenticacion global)</h3>
-<p style="font-size:.85rem;color:#94a3b8;margin-bottom:10px">Primero obtene tu token con el boton de abajo. Se usara automaticamente en todas las peticiones.</p>
+<p style="font-size:.85rem;color:#94a3b8;margin-bottom:10px">Primero obten tu token con tus credenciales. Se inyectara automaticamente en las peticiones que requieran autorizacion.</p>
 <div class="flex-row">
-<input id="login-email" class="input-sm" placeholder="Email" value="admin@mercapp.com" style="width:220px">
-<input id="login-pass" class="input-sm" type="password" placeholder="Password" value="admin123" style="width:160px">
+<input id="login-email" class="input-sm" placeholder="Email" value="haroldgambaforero@gmail.com" style="width:240px">
+<input id="login-pass" class="input-sm" type="password" placeholder="Tu Contraseña" value="" style="width:160px">
 <button class="btn btn-send" onclick="doLogin()">Obtener Token</button>
 <span id="login-status" style="font-size:.82rem;color:#94a3b8"></span>
 </div>
-<textarea id="global-token" class="token-area" rows="2" placeholder="El token JWT aparecera aqui..."></textarea>
+<textarea id="global-token" class="token-area" rows="2" placeholder="El token JWT aparecera aqui al presionar Obtener Token..."></textarea>
 </div>
 
 <div class="section">
@@ -6760,38 +6776,38 @@ pre{background:#020617;padding:14px;border-radius:8px;overflow-x:auto;font-size:
 <div class="endpoint" onclick="togglePanel('p-auth-token')">
 <span class="method method-POST">POST</span>
 <span class="path">/api/auth/token</span>
-<span class="desc">Obtener JWT (login)</span>
+<span class="desc">Obtener JWT (login API)</span>
 </div>
 <div id="p-auth-token" class="panel">
 <h4>Request Body</h4>
-<pre>{"email": "admin@mercapp.com", "password": "admin123"}</pre>
+<pre>Envía email y password ingresados en la barra superior</pre>
 <h4>Respuesta esperada</h4>
 <pre>{"success": true, "token": "eyJhbG...", "expires_in": 43200, "user": {"id": 1, ...}}</pre>
-<button class="btn btn-send" onclick="sendReq('POST','/api/auth/token',JSON.stringify({email:'admin@mercapp.com',password:'admin123'}),'r-auth-token',false)">Enviar</button>
+<button class="btn btn-send" onclick="testLoginEndpoint()">Enviar</button>
 <div id="r-auth-token" class="response-box"></div>
 </div>
 
 <div class="endpoint" onclick="togglePanel('p-no-auth')">
 <span class="method method-GET">GET</span>
-<span class="path">/api/reports/sales</span>
+<span class="path">/api/auth/profile</span>
 <span class="desc">SIN token (debe dar 401)</span>
 </div>
 <div id="p-no-auth" class="panel">
 <h4>Prueba de proteccion</h4>
-<p style="font-size:.85rem;color:#94a3b8;margin-bottom:10px">Esta peticion se envia SIN Authorization header para demostrar que el endpoint esta protegido.</p>
-<button class="btn btn-send" onclick="sendReq('GET','/api/reports/sales',null,'r-no-auth',false)">Enviar SIN Token</button>
+<p style="font-size:.85rem;color:#94a3b8;margin-bottom:10px">Esta peticion se envia a la API sin cabecera Authorization para demostrar que rechaza accesos no autenticados.</p>
+<button class="btn btn-send" onclick="sendReq('GET','/api/auth/profile',null,'r-no-auth',false)">Enviar SIN Token</button>
 <div id="r-no-auth" class="response-box"></div>
 </div>
 
 <div class="endpoint" onclick="togglePanel('p-with-auth')">
 <span class="method method-GET">GET</span>
-<span class="path">/api/reports/sales</span>
+<span class="path">/api/auth/profile</span>
 <span class="desc">CON token (debe dar 200)</span>
 </div>
 <div id="p-with-auth" class="panel">
 <h4>Prueba de acceso autorizado</h4>
-<p style="font-size:.85rem;color:#94a3b8;margin-bottom:10px">Misma peticion pero CON el Bearer Token. Debe retornar 200 con datos.</p>
-<button class="btn btn-send" onclick="sendReq('GET','/api/reports/sales',null,'r-with-auth',true)">Enviar CON Token</button>
+<p style="font-size:.85rem;color:#94a3b8;margin-bottom:10px">Misma peticion pero enviando la cabecera Authorization: Bearer {token}. Debe retornar 200 con los datos del usuario.</p>
+<button class="btn btn-send" onclick="sendReq('GET','/api/auth/profile',null,'r-with-auth',true)">Enviar CON Token</button>
 <div id="r-with-auth" class="response-box"></div>
 </div>
 </div>
@@ -6937,6 +6953,12 @@ function doLogin() {
     .catch(e => { status.textContent = 'Error de red: ' + e; status.style.color = '#ef4444'; });
 }
 
+function testLoginEndpoint() {
+    const email = document.getElementById('login-email').value;
+    const pass = document.getElementById('login-pass').value;
+    sendReq('POST', '/api/auth/token', JSON.stringify({email, password: pass}), 'r-auth-token', false);
+}
+
 function sendReq(method, path, body, respId, useAuth) {
     const box = document.getElementById(respId);
     box.style.display = 'block';
@@ -6945,7 +6967,7 @@ function sendReq(method, path, body, respId, useAuth) {
     const headers = {};
     if (body) headers['Content-Type'] = 'application/json';
     if (useAuth && globalToken) headers['Authorization'] = 'Bearer ' + globalToken;
-    const opts = {method, headers};
+    const opts = {method, headers, credentials: 'omit'};
     if (body) opts.body = body;
     const t0 = performance.now();
     fetch(path, opts)
