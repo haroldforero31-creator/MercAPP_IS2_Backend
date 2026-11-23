@@ -23,4 +23,7 @@ test_stress.db
 instance/
 
 *backup*.db
+.mysqlpass
+.mycnf.ini
+.mysql_isolated/
 

@@ -1294,23 +1294,49 @@ def generate_closing_report_html(active_session, store, admin, stats):
 
 
 def queue_cash_closing_email(active_session, stats):
-    """Encola el reporte de cierre de caja en la base de datos y dispara el envío en segundo plano."""
+    """Envía el reporte de cierre de caja directamente vía send_email_unified.
+    Si falla, encola para reintento automático por el daemon."""
     try:
         admin_user = User.query.filter_by(store_id=active_session.store_id, is_admin=True).order_by(User.id.asc()).first()
         recipient_email = admin_user.email if admin_user and admin_user.email else None
         
         if not recipient_email:
-            print("[EMAIL QUEUE] No se encontró usuario administrador con correo para esta tienda.")
+            print("[EMAIL QUEUE] No se encontro usuario administrador con correo para esta tienda.")
             return False
             
         store = db.session.get(Store, active_session.store_id)
         store_name = store.name if store else "MercAPP"
         
         date_str = active_session.closed_at.strftime('%d/%m/%Y') if active_session.closed_at else datetime.now().strftime('%d/%m/%Y')
-        subject = f"Reporte de Cierre de Caja & Ventas - {store_name} ({date_str})"
+        subject = f"Reporte de Cierre de Caja y Ventas - {store_name} ({date_str})"
         
         html_body = generate_closing_report_html(active_session, store, admin_user, stats)
         
+        print(f"[EMAIL QUEUE] Intentando envio directo del reporte de cierre a {recipient_email}...")
+        
+        # Intento 1: Enviar directamente (sin cola)
+        try:
+            direct_success = send_email_unified(recipient_email, subject, html_body)
+            if direct_success:
+                print(f"[EMAIL QUEUE] Reporte de cierre enviado DIRECTAMENTE a {recipient_email}")
+                # Guardar registro como 'sent' para historial
+                queue_item = EmailQueue(
+                    store_id=active_session.store_id,
+                    recipient=recipient_email,
+                    subject=subject,
+                    html_body=html_body,
+                    email_type='cierre_caja',
+                    status='sent',
+                    sent_at=datetime.now(),
+                    created_at=datetime.now()
+                )
+                db.session.add(queue_item)
+                db.session.commit()
+                return True
+        except Exception as e_direct:
+            print(f"[EMAIL QUEUE] Envio directo fallo: {e_direct}")
+        
+        # Intento 2: Encolar para reintento por daemon
         queue_item = EmailQueue(
             store_id=active_session.store_id,
             recipient=recipient_email,
@@ -1323,13 +1349,15 @@ def queue_cash_closing_email(active_session, stats):
         db.session.add(queue_item)
         db.session.commit()
         
-        print(f"[EMAIL QUEUE] Reporte de cierre de caja encolado con ID {queue_item.id} para {recipient_email}")
+        print(f"[EMAIL QUEUE] Reporte encolado con ID {queue_item.id} para reintento automatico")
         
-        # Intentar enviar inmediatamente en segundo plano
+        # Disparar reintento inmediato en segundo plano
         threading.Thread(target=process_email_queue, daemon=True).start()
         return True
     except Exception as e:
-        print(f"[EMAIL QUEUE] Error al encolar correo de cierre de caja: {e}")
+        print(f"[EMAIL QUEUE] Error critico al procesar correo de cierre: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
@@ -6968,6 +6996,72 @@ def api_health():
         'version': 'IS2-Enterprise',
         'sqlite_wal': True
     }), (200 if db_ok else 500)
+
+
+@app.route('/api/email-queue/status', methods=['GET'])
+@login_required
+@admin_only
+def api_email_queue_status():
+    """Diagnóstico de la cola de correos electrónicos."""
+    try:
+        all_items = EmailQueue.query.order_by(EmailQueue.created_at.desc()).limit(20).all()
+        pending = EmailQueue.query.filter_by(status='pending').count()
+        sent = EmailQueue.query.filter_by(status='sent').count()
+        failed = EmailQueue.query.filter_by(status='failed').count()
+        
+        items_data = []
+        for item in all_items:
+            items_data.append({
+                'id': item.id,
+                'recipient': item.recipient,
+                'subject': item.subject[:80] if item.subject else '',
+                'email_type': getattr(item, 'email_type', 'unknown'),
+                'status': item.status,
+                'attempts': item.attempts or 0,
+                'last_error': (item.last_error or '')[:200],
+                'created_at': item.created_at.isoformat() if item.created_at else None,
+                'sent_at': item.sent_at.isoformat() if item.sent_at else None
+            })
+        
+        brevo_key = os.getenv('BREVO_API_KEY')
+        
+        return jsonify({
+            'success': True,
+            'summary': {
+                'pending': pending,
+                'sent': sent,
+                'failed': failed,
+                'total': pending + sent + failed
+            },
+            'brevo_configured': bool(brevo_key),
+            'brevo_key_prefix': brevo_key[:15] + '...' if brevo_key else None,
+            'recent_items': items_data
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/email-queue/retry-all', methods=['POST'])
+@login_required
+@admin_only
+def api_email_queue_retry():
+    """Resetea todos los correos fallidos/pendientes para reintento."""
+    try:
+        stuck = EmailQueue.query.filter(EmailQueue.status.in_(['pending', 'failed'])).all()
+        count = 0
+        for item in stuck:
+            item.status = 'pending'
+            item.attempts = 0
+            item.last_error = None
+            count += 1
+        db.session.commit()
+        
+        if count > 0:
+            threading.Thread(target=process_email_queue, daemon=True).start()
+        
+        return jsonify({'success': True, 'reset_count': count, 'message': f'{count} correo(s) reseteados para reenvío.'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 # ============================================================
