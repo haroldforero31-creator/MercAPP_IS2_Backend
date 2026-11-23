@@ -433,8 +433,13 @@ class MerkiService:
             m = re.search(p, t)
             if m:
                 name = m.group(1).strip()
-                # Quitar muletillas
-                name = re.sub(r'\s+(?:y\s+ha\s+abonado|y\s+cuanto|por\s+favor|dime|etc).*$', '', name).strip()
+                # Quitar muletillas sin retroceso superlineal (S8786)
+                name = ' '.join(name.split())
+                for stop in (' y ha abonado', ' y cuanto', ' por favor', ' dime', ' etc'):
+                    idx = name.lower().find(stop)
+                    if idx != -1:
+                        name = name[:idx]
+                name = name.strip()
                 name = re.sub(r'^(?:el|la|los|las|de|del|a|al)\s+', '', name).strip()
                 if len(name) >= 2 and name not in excluded and not any(name == ex for ex in excluded):
                     return name
@@ -666,7 +671,12 @@ class MerkiService:
                     if item_a.startswith(stop + ' '): item_a = item_a[len(stop)+1:].strip()
                     if item_b.startswith(stop + ' '): item_b = item_b[len(stop)+1:].strip()
                 item_b = re.sub(r'[\?¿\.,!]', '', item_b).strip()
-                item_b = re.sub(r'\s+(?:por\s+favor|dime|etc).*$', '', item_b).strip()
+                item_b = ' '.join(item_b.split())
+                for stop in (' por favor', ' dime', ' etc'):
+                    idx = item_b.lower().find(stop)
+                    if idx != -1:
+                        item_b = item_b[:idx]
+                item_b = item_b.strip()
                 if item_a and item_b and item_a != item_b:
                     return {'type': comp_type, 'item_a': item_a, 'item_b': item_b}
         return None
